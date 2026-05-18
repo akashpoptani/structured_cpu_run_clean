@@ -9,7 +9,12 @@ bash scripts/submit_experiment.sh TPCHECK
 submit_experiment.sh calls parse_config.sh file:
 ```bash
 bash scripts/parse_config.sh TPCHECK
+bash scripts/parse_config.sh --format env TPCHECK
 ```
+
+Default `parse_config.sh` output is human-readable.
+
+`parse_config.sh --format env` output is machine-readable and future scripts can source it.
 
 `parse_config.sh` parses, validates, and prints the resolved config.
 

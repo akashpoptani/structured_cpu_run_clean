@@ -46,6 +46,10 @@ The command exists only as a non-submitting skeleton right now.
 - `ACTIVE_MODEL_PATH` is derived from `WEIGHTS_PRECISION`.
 - `PP_SIZE` must remain `1`.
 - The parser validates known enum values and required fields.
+- It has human-readable output by default.
+- `scripts/parse_config.sh --format env <TAG>` emits shell-safe resolved env.
+- Future sbatch generation will consume the env output.
+- The parser still does not create files or submit jobs.
 
 ## 4. RUN_MODE
 

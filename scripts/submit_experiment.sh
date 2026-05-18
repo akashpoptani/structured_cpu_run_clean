@@ -22,6 +22,10 @@ echo
 bash "$CLEAN_ROOT/scripts/parse_config.sh" "$TAG"
 
 echo
+echo "Resolved env preview:"
+bash "$CLEAN_ROOT/scripts/parse_config.sh" --format env "$TAG"
+
+echo
 echo "TODO future step: generate sbatch script from parsed config."
 echo "TODO future step: submit sbatch."
 echo "TODO future step: write .last_job."

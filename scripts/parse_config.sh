@@ -2,20 +2,15 @@
 set -euo pipefail
 
 usage() {
-  echo "Usage: bash scripts/parse_config.sh <TAG>" >&2
+  echo "Usage: bash scripts/parse_config.sh [--format human|env] <TAG>" >&2
+  echo "       bash scripts/parse_config.sh <TAG> [--format human|env]" >&2
   echo "Example: bash scripts/parse_config.sh TPCHECK" >&2
+  echo "Example: bash scripts/parse_config.sh --format env TPCHECK" >&2
 }
 
 die() {
   echo "ERROR: $*" >&2
   exit 1
-}
-
-require_one_arg() {
-  if [[ $# -ne 1 || -z "${1:-}" ]]; then
-    usage
-    exit 2
-  fi
 }
 
 require_non_empty() {
@@ -42,13 +37,52 @@ require_one_of() {
   die "$name must be one of: $*; got: $value"
 }
 
-require_one_arg "$@"
+print_env_var() {
+  local name="$1"
+  local value="${!name:-}"
 
-TAG="$1"
+  printf '%s=%q\n' "$name" "$value"
+}
+
+FORMAT="human"
+TAG=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --format)
+      if [[ $# -lt 2 || -z "${2:-}" ]]; then
+        usage
+        exit 2
+      fi
+      FORMAT="$2"
+      shift 2
+      ;;
+    -*)
+      usage
+      exit 2
+      ;;
+    *)
+      if [[ -n "$TAG" ]]; then
+        usage
+        exit 2
+      fi
+      TAG="$1"
+      shift
+      ;;
+  esac
+done
+
+if [[ -z "$TAG" ]]; then
+  usage
+  exit 2
+fi
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CLEAN_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 CONFIG_DIR="$CLEAN_ROOT/scripts/configs"
 BASELINE_CONFIG="$CONFIG_DIR/_baseline.env"
+
+require_one_of FORMAT "$FORMAT" human env
 
 [[ -f "$BASELINE_CONFIG" ]] || die "baseline config not found: $BASELINE_CONFIG"
 
@@ -135,6 +169,59 @@ require_one_of TIME_PROFILE "$TIME_PROFILE" 0 1
 
 if [[ "$PP_SIZE" != "1" ]]; then
   die "PP_SIZE must remain 1 because pipeline parallelism is out of scope; got: $PP_SIZE"
+fi
+
+if [[ "$FORMAT" == "env" ]]; then
+  env_fields=(
+    TAG
+    OVERRIDE_CONFIG
+    EXPERIMENT_ID
+    RUN_MODE
+    RUN_LABEL
+    PROJECT_ROOT
+    CLEAN_ROOT
+    DEEPSEEK_REPO
+    MODEL_PATH_FP8
+    MODEL_PATH_BF16
+    ACTIVE_MODEL_PATH
+    TOKENIZER_PATH
+    GPU_REFERENCE_PATH
+    OUTPUT_ROOT
+    SBATCH_NODES
+    SBATCH_TASKS_PER_NODE
+    SBATCH_CPUS_PER_TASK
+    SBATCH_MEM
+    SBATCH_TIME
+    SBATCH_PARTITION
+    DP_SIZE
+    TP_SIZE
+    EP_SIZE
+    PP_SIZE
+    SHARDING_MODE
+    LIN_TOKENS
+    LOUT_TOKENS
+    BATCH_SIZE
+    INFERENCE_ARCHITECTURE
+    STREAMING
+    SESSION_MODE
+    WEIGHTS_PRECISION
+    KV_CACHE_DTYPE
+    OMP_NUM_THREADS
+    OMP_PROC_BIND
+    OMP_PLACES
+    FAST_LINEAR
+    BATCHED_MOE
+    AMX_ENABLED
+    DEQUANT_FP8_WEIGHTS
+    MEM_PROFILE
+    TIME_PROFILE
+    PROFILE_GRANULARITY
+  )
+
+  for field in "${env_fields[@]}"; do
+    print_env_var "$field"
+  done
+  exit 0
 fi
 
 cat <<EOF

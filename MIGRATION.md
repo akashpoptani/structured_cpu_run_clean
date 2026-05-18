@@ -1,11 +1,13 @@
 # Migration
 
-Current phase: entrypoint skeleton and config parser.
+Current phase: machine-readable config parser output.
 
 Completed:
 - Skeleton repo created and pushed.
 - Inventory documentation added.
 - Baseline config and TPCHECK override added.
+- Non-submitting `submit_experiment.sh` skeleton added.
+- `parse_config.sh` human summary added.
 
 Next planned phase: dry-run sbatch generation.
 
