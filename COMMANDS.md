@@ -29,6 +29,10 @@ It does not submit jobs. The generated sbatch is placeholder only and does not r
 
 Generated sbatches now delegate to `scripts/run_case.sh`. `run_case.sh` is currently a placeholder and does not run inference yet.
 
+`run_case.sh` has placeholder dispatch for `verify`, `bench`, `both`, and `generate`.
+
+Only `direct_native` is allowed as a placeholder path right now. `server_client` is schema-visible but not implemented.
+
 Generated artifact examples:
 
 - `examples/generated/TPCHECK_resolved.env`

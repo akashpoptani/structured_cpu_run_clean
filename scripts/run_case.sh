@@ -40,10 +40,50 @@ MEM_PROFILE: $MEM_PROFILE
 TIME_PROFILE: $TIME_PROFILE
 INFERENCE_ARCHITECTURE: $INFERENCE_ARCHITECTURE
 SESSION_MODE: $SESSION_MODE
-
-TODO: load modules
-TODO: export OMP_NUM_THREADS / OMP_PROC_BIND / OMP_PLACES
-TODO: choose run mode: verify | bench | both | generate
-TODO: launch torch.distributed.run for direct_native mode
-TODO: call clean verification/benchmark runner
 EOF
+
+echo
+case "$RUN_MODE" in
+  verify)
+    echo "RUN_MODE=verify"
+    echo "TODO: run clean verification runner"
+    ;;
+  bench)
+    echo "RUN_MODE=bench"
+    echo "TODO: run clean benchmark runner"
+    ;;
+  both)
+    echo "RUN_MODE=both"
+    echo "TODO: run small verification first"
+    echo "TODO: then run benchmark"
+    ;;
+  generate)
+    echo "RUN_MODE=generate"
+    echo "TODO: run clean generation runner"
+    ;;
+  *)
+    echo "ERROR: unknown RUN_MODE: $RUN_MODE" >&2
+    exit 1
+    ;;
+esac
+
+echo
+case "$INFERENCE_ARCHITECTURE" in
+  direct_native)
+    echo "INFERENCE_ARCHITECTURE=direct_native"
+    echo "TODO: use direct PyTorch model.forward / torch.distributed.run path"
+    ;;
+  server_client)
+    echo "INFERENCE_ARCHITECTURE=server_client"
+    echo "TODO: server/client mode is future-facing and not implemented yet"
+    exit 1
+    ;;
+  *)
+    echo "ERROR: unknown INFERENCE_ARCHITECTURE: $INFERENCE_ARCHITECTURE" >&2
+    exit 1
+    ;;
+esac
+
+echo
+echo "TODO: load modules"
+echo "TODO: export OMP_NUM_THREADS / OMP_PROC_BIND / OMP_PLACES"

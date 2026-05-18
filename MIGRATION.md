@@ -1,6 +1,6 @@
 # Migration
 
-Current phase: run_case placeholder.
+Current phase: run_case mode dispatch placeholder.
 
 Completed:
 - Skeleton repo created and pushed.
@@ -9,8 +9,9 @@ Completed:
 - Non-submitting `submit_experiment.sh` skeleton added.
 - `parse_config.sh` human and env output added.
 - Dry-run sbatch generation added.
+- `run_case.sh` placeholder added.
 
-Next planned phase: run_case mode dispatch placeholder.
+Next planned phase: copy minimal verification reference data.
 
 Not yet started:
 - Real Slurm submission.
