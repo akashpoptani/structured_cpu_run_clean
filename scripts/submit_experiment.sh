@@ -50,17 +50,8 @@ cat > "$SBATCH_PATH" <<EOF
 
 set -euo pipefail
 
-echo "Dry-run generated sbatch. Not a real runner yet."
-echo "TAG: $TAG"
-echo "RUN_MODE: $RUN_MODE"
-echo "SHARDING_MODE: $SHARDING_MODE"
-echo "ACTIVE_MODEL_PATH: $ACTIVE_MODEL_PATH"
-echo "LIN_TOKENS / LOUT_TOKENS / BATCH_SIZE: $LIN_TOKENS / $LOUT_TOKENS / $BATCH_SIZE"
-echo "TODO: load modules"
-echo "TODO: set OMP env vars"
-echo "TODO: launch torch.distributed.run"
-echo "TODO: call clean verification/benchmark runner"
-exit 0
+echo "Dry-run generated sbatch. Calling run_case.sh placeholder."
+bash "$CLEAN_ROOT/scripts/run_case.sh" "$RESOLVED_CONFIG_PATH"
 EOF
 
 echo

@@ -1,6 +1,6 @@
 # Migration
 
-Current phase: dry-run sbatch generation.
+Current phase: run_case placeholder.
 
 Completed:
 - Skeleton repo created and pushed.
@@ -8,8 +8,9 @@ Completed:
 - Baseline config and TPCHECK override added.
 - Non-submitting `submit_experiment.sh` skeleton added.
 - `parse_config.sh` human and env output added.
+- Dry-run sbatch generation added.
 
-Next planned phase: create `run_case.sh` placeholder.
+Next planned phase: run_case mode dispatch placeholder.
 
 Not yet started:
 - Real Slurm submission.

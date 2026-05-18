@@ -53,6 +53,8 @@ The command exists only as a non-submitting skeleton right now.
 
 `scripts/submit_experiment.sh` consumes `scripts/parse_config.sh --format env <TAG>`. Dry-run sbatch generation is the first consumer of machine-readable env output. The generated sbatch is not yet a real runner.
 
+`scripts/submit_experiment.sh` generates the sbatch. The generated sbatch delegates execution to `scripts/run_case.sh`, and `scripts/run_case.sh` consumes the resolved config snapshot.
+
 ## 4. RUN_MODE
 
 Supported schema values:
