@@ -33,6 +33,12 @@ Generated sbatches now delegate to `scripts/run_case.sh`. `run_case.sh` is curre
 
 Only `direct_native` is allowed as a placeholder path right now. `server_client` is schema-visible but not implemented.
 
+Verification reference data exists under `verification/references/`.
+
+Initial reference group: `verification/references/prompt1_bs1_lin10_lout15/` for 1 prompt, batch size 1, Lin 10, and Lout 15.
+
+No clean verification command exists yet.
+
 Generated artifact examples:
 
 - `examples/generated/TPCHECK_resolved.env`

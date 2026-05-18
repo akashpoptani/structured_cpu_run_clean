@@ -1,6 +1,6 @@
 # Migration
 
-Current phase: run_case mode dispatch placeholder.
+Current phase: minimal verification reference data with descriptive reference group name.
 
 Completed:
 - Skeleton repo created and pushed.
@@ -9,14 +9,14 @@ Completed:
 - Non-submitting `submit_experiment.sh` skeleton added.
 - `parse_config.sh` human and env output added.
 - Dry-run sbatch generation added.
-- `run_case.sh` placeholder added.
+- `run_case.sh` placeholder and mode dispatch added.
 
-Next planned phase: copy minimal verification reference data.
+Next planned phase: create clean verification runner placeholder.
 
 Not yet started:
 - Real Slurm submission.
 - `torch.distributed` launch.
 - Code copy.
-- Verification runner in clean lane.
+- Clean verification runner.
 
 No code has been copied yet.

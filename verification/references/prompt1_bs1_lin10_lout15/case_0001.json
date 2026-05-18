@@ -1,0 +1,38 @@
+{
+  "case_id": "case_0001",
+  "tag": "prompt1_bs1_lin10_lout15",
+  "description": "Initial single-prompt GPU reference used for TP2 CPU verification bring-up.",
+  "prompt_text": "The capital city of France is Paris and Germany is",
+  "lin_tokens": 10,
+  "lout_tokens": 15,
+  "batch_size": 1,
+  "sampling": {
+    "method": "greedy",
+    "temperature": 0.0,
+    "min_tokens": 15,
+    "max_tokens": 15,
+    "ignore_eos": true
+  },
+  "expected_output_token_ids": [
+    17575,
+    16,
+    455,
+    6102,
+    4593,
+    294,
+    8760,
+    344,
+    11111,
+    305,
+    10322,
+    344,
+    17575,
+    16,
+    455
+  ],
+  "source": {
+    "origin": "Existing structured_cpu_run GPU reference",
+    "original_reference_file": "../structured_cpu_run/verification/gpu_reference_27160861.json",
+    "notes": "Reference copied as data only. No code was copied."
+  }
+}
