@@ -51,6 +51,8 @@ The command exists only as a non-submitting skeleton right now.
 - Future sbatch generation will consume the env output.
 - The parser still does not create files or submit jobs.
 
+`scripts/submit_experiment.sh` consumes `scripts/parse_config.sh --format env <TAG>`. Dry-run sbatch generation is the first consumer of machine-readable env output. The generated sbatch is not yet a real runner.
+
 ## 4. RUN_MODE
 
 Supported schema values:
