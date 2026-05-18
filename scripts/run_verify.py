@@ -191,7 +191,7 @@ def build_result(config: Dict[str, str], mock_mode: str) -> Dict[str, Any]:
 def write_result(config: Dict[str, str], result: Dict[str, Any]) -> Path:
     clean_root = Path(config["CLEAN_ROOT"])
     output_root = resolve_path(clean_root, config["OUTPUT_ROOT"])
-    result_path = output_root / "results" / f"{config['TAG']}_verify_results.json"
+    result_path = output_root / "results" / config["TAG"] / "verify_results.json"
     result_path.parent.mkdir(parents=True, exist_ok=True)
     result_path.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return result_path

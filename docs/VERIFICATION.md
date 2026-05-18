@@ -68,7 +68,7 @@ It does not validate model output, logits, layer outputs, attention outputs, or 
 
 It reads the resolved config, reads `GPU_REFERENCE_PATH`, loads reference cases, generates mock output tokens, and compares generated token IDs to expected GPU token IDs.
 
-It writes results to `results_clean/results/<TAG>_verify_results.json`.
+It writes results to `results_clean/results/<TAG>/verify_results.json`.
 
 Random mode is expected to fail because it generates deterministic random token IDs.
 
