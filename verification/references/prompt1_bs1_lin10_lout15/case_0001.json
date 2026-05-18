@@ -1,7 +1,7 @@
 {
   "case_id": "case_0001",
   "tag": "prompt1_bs1_lin10_lout15",
-  "description": "Initial single-prompt GPU reference used for TP2 CPU verification bring-up.",
+  "description": "Initial single-prompt GPU reference used for CPU verification bring-up.",
   "prompt_text": "The capital city of France is Paris and Germany is",
   "lin_tokens": 10,
   "lout_tokens": 15,

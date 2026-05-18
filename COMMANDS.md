@@ -17,6 +17,12 @@ Placeholder case runner:
 bash scripts/run_case.sh results_clean/resolved_configs/TPCHECK_resolved.env
 ```
 
+Verification reference inspector:
+```bash
+python scripts/inspect_reference_cases.py --reference-root verification/references/
+python scripts/inspect_reference_cases.py --reference-root verification/references/ --format json
+```
+
 Default `parse_config.sh` output is human-readable.
 
 `parse_config.sh --format env` output is machine-readable and future scripts can source it.
@@ -38,6 +44,10 @@ Verification reference data exists under `verification/references/`.
 Initial reference group: `verification/references/prompt1_bs1_lin10_lout15/` for 1 prompt, batch size 1, Lin 10, and Lout 15.
 
 No clean verification command exists yet.
+
+`inspect_reference_cases.py` inspects and validates reference-case JSON files. It does not run model inference.
+
+`run_case.sh` verify now calls this inspector.
 
 Generated artifact examples:
 

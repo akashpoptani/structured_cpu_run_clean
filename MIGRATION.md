@@ -1,6 +1,6 @@
 # Migration
 
-Current phase: minimal verification reference data with descriptive reference group name.
+Current phase: Python verification reference inspector.
 
 Completed:
 - Skeleton repo created and pushed.
@@ -10,13 +10,14 @@ Completed:
 - `parse_config.sh` human and env output added.
 - Dry-run sbatch generation added.
 - `run_case.sh` placeholder and mode dispatch added.
+- Minimal verification reference data added with descriptive group name.
 
-Next planned phase: create clean verification runner placeholder.
+Next planned phase: clean verification runner placeholder.
 
 Not yet started:
-- Real Slurm submission.
+- Actual model verification.
+- Model loading.
 - `torch.distributed` launch.
 - Code copy.
-- Clean verification runner.
 
 No code has been copied yet.

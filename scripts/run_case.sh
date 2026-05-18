@@ -11,6 +11,18 @@ if [[ $# -ne 1 || -z "${1:-}" ]]; then
 fi
 
 RESOLVED_CONFIG_PATH="$1"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CLEAN_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+PYTHON_BIN="${PYTHON:-python}"
+
+if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
+  if command -v python3 >/dev/null 2>&1; then
+    PYTHON_BIN="python3"
+  else
+    echo "ERROR: neither '$PYTHON_BIN' nor python3 was found" >&2
+    exit 1
+  fi
+fi
 
 if [[ ! -f "$RESOLVED_CONFIG_PATH" ]]; then
   echo "ERROR: resolved config file not found: $RESOLVED_CONFIG_PATH" >&2
@@ -46,6 +58,14 @@ echo
 case "$RUN_MODE" in
   verify)
     echo "RUN_MODE=verify"
+    if [[ "$GPU_REFERENCE_PATH" = /* ]]; then
+      RESOLVED_GPU_REFERENCE_PATH="$GPU_REFERENCE_PATH"
+    else
+      RESOLVED_GPU_REFERENCE_PATH="$CLEAN_ROOT/$GPU_REFERENCE_PATH"
+    fi
+    "$PYTHON_BIN" "$CLEAN_ROOT/scripts/inspect_reference_cases.py" \
+      --reference-root "$RESOLVED_GPU_REFERENCE_PATH" \
+      --format human
     echo "TODO: run clean verification runner"
     ;;
   bench)
