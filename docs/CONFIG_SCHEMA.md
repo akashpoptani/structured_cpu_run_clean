@@ -2,7 +2,7 @@
 
 Purpose: Define the future clean configuration format.
 
-This document describes the intended configuration model. No runnable config resolver exists yet.
+This document describes the intended configuration model and the first local-only parser.
 
 ## 1. Config Model
 
@@ -10,9 +10,9 @@ The clean lane uses a flat env-file design.
 
 - `scripts/configs/_baseline.env` contains defaults.
 - Override env files should contain only changed values plus experiment identity.
-- No runnable resolver exists yet.
+- `scripts/parse_config.sh` parses, validates, and prints the resolved config.
 
-The intended future behavior is that a resolver sources `scripts/configs/_baseline.env` first, then sources one override env file, validates the combined config, and then generates a run plan. That resolver has not been written.
+No runnable job submission flow exists yet.
 
 ## 2. Naming Convention
 
@@ -34,9 +34,20 @@ The tag prefix is the user-facing config name used by commands like:
 bash scripts/submit_experiment.sh TPCHECK
 ```
 
-The command does not exist yet; this is naming design only.
+The command exists only as a non-submitting skeleton right now.
 
-## 3. RUN_MODE
+## 3. Parser Behavior
+
+`scripts/parse_config.sh` is local-only and does not submit jobs.
+
+- It sources `scripts/configs/_baseline.env` first.
+- Then it sources exactly one `TAG_*.env` override.
+- Override files should contain only changed values plus experiment identity.
+- `ACTIVE_MODEL_PATH` is derived from `WEIGHTS_PRECISION`.
+- `PP_SIZE` must remain `1`.
+- The parser validates known enum values and required fields.
+
+## 4. RUN_MODE
 
 Supported schema values:
 
@@ -47,7 +58,7 @@ Supported schema values:
 
 `RUN_MODE` controls the high-level behavior. A separate `VERIFY_ENABLED` field is intentionally not included.
 
-## 4. INFERENCE_ARCHITECTURE
+## 5. INFERENCE_ARCHITECTURE
 
 Supported schema values:
 
@@ -56,19 +67,19 @@ Supported schema values:
 
 `server_client` is future-facing and not implemented yet.
 
-## 5. STREAMING
+## 6. STREAMING
 
 `STREAMING` means token/output streaming: exposing tokens or results incrementally as they are generated instead of only after the full decode finishes.
 
 For `direct_native`, `STREAMING` should currently remain `0`.
 
-## 6. SESSION_MODE
+## 7. SESSION_MODE
 
 `SESSION_MODE` means one allocation/session can run multiple cases without restarting everything.
 
 This is an important future feature for reducing repeated setup cost, but it is not implemented yet.
 
-## 7. BATCH_SIZE
+## 8. BATCH_SIZE
 
 `BATCH_SIZE` is the number of prompts processed together.
 
@@ -76,7 +87,7 @@ It is not the same thing as concurrency.
 
 `CONCURRENCY` is intentionally not included right now. The first clean config layer should describe the model workload, not a future serving/request scheduler.
 
-## 8. Verification Controls
+## 9. Verification Controls
 
 Verification behavior is controlled by `RUN_MODE` plus `GPU_REFERENCE_PATH` for now.
 
@@ -88,7 +99,7 @@ The following fields are intentionally not included:
 
 Token comparison is implied by `RUN_MODE=verify` or `RUN_MODE=both` until the clean verification design becomes more explicit.
 
-## 9. Parallelism Scope
+## 10. Parallelism Scope
 
 Pipeline parallelism is schema-visible but out of scope.
 
@@ -96,7 +107,7 @@ Pipeline parallelism is schema-visible but out of scope.
 - `TP_SIZE`, `DP_SIZE`, and `EP_SIZE` describe the intended CPU sharding shape.
 - `SHARDING_MODE` is the high-level mode name used to select behavior.
 
-## 10. Precision Scope
+## 11. Precision Scope
 
 `WEIGHTS_PRECISION` and `KV_CACHE_DTYPE` are separate concepts.
 
