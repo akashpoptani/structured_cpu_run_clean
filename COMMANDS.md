@@ -23,6 +23,13 @@ python scripts/inspect_reference_cases.py --reference-root verification/referenc
 python scripts/inspect_reference_cases.py --reference-root verification/references/ --format json
 ```
 
+Mock clean verification runner:
+```bash
+python3 scripts/run_verify.py --resolved-config results_clean/resolved_configs/TPCHECK_resolved.env
+python3 scripts/run_verify.py --resolved-config results_clean/resolved_configs/TPCHECK_resolved.env --mock-mode golden
+python3 scripts/run_verify.py --resolved-config results_clean/resolved_configs/TPCHECK_resolved.env --format json
+```
+
 Default `parse_config.sh` output is human-readable.
 
 `parse_config.sh --format env` output is machine-readable and future scripts can source it.
@@ -47,7 +54,13 @@ No clean verification command exists yet.
 
 `inspect_reference_cases.py` inspects and validates reference-case JSON files. It does not run model inference.
 
-`run_case.sh` verify now calls this inspector.
+`run_verify.py` reads resolved config, loads reference cases, generates mock output tokens, compares generated token IDs to expected GPU token IDs, and writes a result JSON file.
+
+Random mode is the default and usually fails because it generates deterministic random tokens. Golden mode uses expected tokens and should pass; it is only for plumbing tests.
+
+`run_case.sh` verify now calls `run_verify.py` in random mock mode.
+
+This still does not load model weights.
 
 Generated artifact examples:
 

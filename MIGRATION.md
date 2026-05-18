@@ -1,6 +1,6 @@
 # Migration
 
-Current phase: Python verification reference inspector.
+Current phase: clean verification runner with mock inference.
 
 Completed:
 - Skeleton repo created and pushed.
@@ -11,13 +11,14 @@ Completed:
 - Dry-run sbatch generation added.
 - `run_case.sh` placeholder and mode dispatch added.
 - Minimal verification reference data added with descriptive group name.
+- Python verification reference inspector added.
 
-Next planned phase: clean verification runner placeholder.
+Next planned phase: replace mock inference with minimal clean CPU inference entrypoint.
 
 Not yet started:
-- Actual model verification.
-- Model loading.
+- Actual model loading.
 - `torch.distributed` launch.
-- Code copy.
+- Real token generation.
+- Code copy from old `verify_cpu.py`.
 
 No code has been copied yet.

@@ -58,15 +58,11 @@ echo
 case "$RUN_MODE" in
   verify)
     echo "RUN_MODE=verify"
-    if [[ "$GPU_REFERENCE_PATH" = /* ]]; then
-      RESOLVED_GPU_REFERENCE_PATH="$GPU_REFERENCE_PATH"
-    else
-      RESOLVED_GPU_REFERENCE_PATH="$CLEAN_ROOT/$GPU_REFERENCE_PATH"
-    fi
-    "$PYTHON_BIN" "$CLEAN_ROOT/scripts/inspect_reference_cases.py" \
-      --reference-root "$RESOLVED_GPU_REFERENCE_PATH" \
+    "$PYTHON_BIN" "$CLEAN_ROOT/scripts/run_verify.py" \
+      --resolved-config "$RESOLVED_CONFIG_PATH" \
+      --mock-mode random \
       --format human
-    echo "TODO: run clean verification runner"
+    echo "TODO: replace mock verification with actual clean CPU inference"
     ;;
   bench)
     echo "RUN_MODE=bench"

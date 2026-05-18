@@ -62,4 +62,26 @@ The inspector currently validates schema, basic field types, positive token and 
 
 It does not validate model output, logits, layer outputs, attention outputs, or MoE outputs yet.
 
+## Clean verification runner, mock mode
+
+`scripts/run_verify.py` is the first end-to-end verification runner.
+
+It reads the resolved config, reads `GPU_REFERENCE_PATH`, loads reference cases, generates mock output tokens, and compares generated token IDs to expected GPU token IDs.
+
+It writes results to `results_clean/results/<TAG>_verify_results.json`.
+
+Random mode is expected to fail because it generates deterministic random token IDs.
+
+Golden mode is expected to pass because it uses the expected tokens as generated tokens. Golden mode only tests plumbing.
+
+Actual model inference is not implemented yet.
+
+Current commands:
+
+```bash
+python3 scripts/run_verify.py --resolved-config results_clean/resolved_configs/TPCHECK_resolved.env
+python3 scripts/run_verify.py --resolved-config results_clean/resolved_configs/TPCHECK_resolved.env --mock-mode golden
+python3 scripts/run_verify.py --resolved-config results_clean/resolved_configs/TPCHECK_resolved.env --format json
+```
+
 Do not treat this document as complete yet.
