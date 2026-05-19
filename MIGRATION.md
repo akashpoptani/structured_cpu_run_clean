@@ -1,6 +1,6 @@
 # Migration
 
-Current phase: clean verification runner with mock inference.
+Current phase: native CPU inference import smoke test.
 
 Completed:
 - Skeleton repo created and pushed.
@@ -12,13 +12,14 @@ Completed:
 - `run_case.sh` placeholder and mode dispatch added.
 - Minimal verification reference data added with descriptive group name.
 - Python verification reference inspector added.
+- Mock verification runner added.
 
-Next planned phase: replace mock inference with minimal clean CPU inference entrypoint.
+Next planned phase: load-only model construction smoke test.
 
 Not yet started:
-- Actual model loading.
+- Model construction.
+- Weight loading.
 - `torch.distributed` launch.
 - Real token generation.
-- Code copy from old `verify_cpu.py`.
 
 No code has been copied yet.

@@ -63,6 +63,7 @@ case "$RUN_MODE" in
       --mock-mode random \
       --format human
     echo "TODO: replace mock verification with actual clean CPU inference"
+    echo "TODO: next inference bring-up command is scripts/inference_import_smoke.py"
     ;;
   bench)
     echo "RUN_MODE=bench"

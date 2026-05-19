@@ -30,6 +30,13 @@ python3 scripts/run_verify.py --resolved-config results_clean/resolved_configs/T
 python3 scripts/run_verify.py --resolved-config results_clean/resolved_configs/TPCHECK_resolved.env --format json
 ```
 
+Native CPU inference import smoke test:
+```bash
+/home/akashpt/DeepSeekRun/structured_cpu_run/without_vllm/.venv/bin/python scripts/inference_import_smoke.py --resolved-config results_clean/resolved_configs/TPCHECK_resolved.env
+LATER - we'll create our own venv - will do that in the next step
+python3 scripts/inference_import_smoke.py --resolved-config results_clean/resolved_configs/TPCHECK_resolved.env
+```
+
 Default `parse_config.sh` output is human-readable.
 
 `parse_config.sh --format env` output is machine-readable and future scripts can source it.
@@ -61,6 +68,8 @@ Random mode is the default and usually fails because it generates deterministic 
 `run_case.sh` verify now calls `run_verify.py` in random mock mode.
 
 This still does not load model weights.
+
+`inference_import_smoke.py` is the first native CPU inference bring-up check. It verifies clean override import ordering, does not instantiate the model, does not load weights, and does not generate tokens.
 
 Generated artifact examples:
 
