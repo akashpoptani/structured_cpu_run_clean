@@ -1,0 +1,9 @@
+# Minimal intended dependency set for the clean CPU lane.
+# Versions are based on the previously working structured_cpu_run venv.
+--extra-index-url https://download.pytorch.org/whl/cpu
+
+numpy==2.4.4
+safetensors==0.7.0
+tokenizers==0.22.2
+torch==2.11.0+cpu
+transformers==5.5.0

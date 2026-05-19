@@ -1,6 +1,6 @@
 # Migration
 
-Current phase: native CPU inference import smoke test.
+Current phase: clean venv setup and README polish.
 
 Completed:
 - Skeleton repo created and pushed.
@@ -13,8 +13,9 @@ Completed:
 - Minimal verification reference data added with descriptive group name.
 - Python verification reference inspector added.
 - Mock verification runner added.
+- Native CPU inference import smoke test with old known-good venv.
 
-Next planned phase: load-only model construction smoke test.
+Next planned phase: create clean venv and rerun `inference_import_smoke.py` using `.venv/bin/python`.
 
 Not yet started:
 - Model construction.

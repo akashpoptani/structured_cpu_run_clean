@@ -6,6 +6,35 @@ Current local commands:
 bash scripts/submit_experiment.sh TPCHECK
 ```
 
+Environment setup:
+```bash
+cd /home/akashpt/DeepSeekRun/structured_cpu_run_clean
+
+module load python/3.12.1
+rm -rf .venv
+bash scripts/setup_venv.sh
+
+.venv/bin/python -c "import torch; print('torch', torch.__version__)"
+bash scripts/submit_experiment.sh TPCHECK
+.venv/bin/python scripts/inference_import_smoke.py --resolved-config results_clean/resolved_configs/TPCHECK_resolved.env
+PYTHON=.venv/bin/python bash scripts/run_case.sh results_clean/resolved_configs/TPCHECK_resolved.env
+```
+
+If you are not using an Lmod Python module, pass an explicit interpreter:
+```bash
+PYTHON_BIN=/path/to/python3.12 bash scripts/setup_venv.sh
+```
+
+If setup failed partway, remove the partial venv before retrying:
+```bash
+rm -rf .venv
+```
+
+Temporary known-good old venv:
+```bash
+/home/akashpt/DeepSeekRun/structured_cpu_run/without_vllm/.venv/bin/python scripts/inference_import_smoke.py --resolved-config results_clean/resolved_configs/TPCHECK_resolved.env
+```
+
 submit_experiment.sh calls parse_config.sh file:
 ```bash
 bash scripts/parse_config.sh TPCHECK
@@ -32,9 +61,7 @@ python3 scripts/run_verify.py --resolved-config results_clean/resolved_configs/T
 
 Native CPU inference import smoke test:
 ```bash
-/home/akashpt/DeepSeekRun/structured_cpu_run/without_vllm/.venv/bin/python scripts/inference_import_smoke.py --resolved-config results_clean/resolved_configs/TPCHECK_resolved.env
-LATER - we'll create our own venv - will do that in the next step
-python3 scripts/inference_import_smoke.py --resolved-config results_clean/resolved_configs/TPCHECK_resolved.env
+.venv/bin/python scripts/inference_import_smoke.py --resolved-config results_clean/resolved_configs/TPCHECK_resolved.env
 ```
 
 Default `parse_config.sh` output is human-readable.
