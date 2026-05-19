@@ -88,6 +88,7 @@ echo
 case "$INFERENCE_ARCHITECTURE" in
   direct_native)
     echo "INFERENCE_ARCHITECTURE=direct_native"
+    echo "TODO: next safe command is scripts/model_preflight.py"
     echo "TODO: use direct PyTorch model.forward / torch.distributed.run path"
     ;;
   server_client)

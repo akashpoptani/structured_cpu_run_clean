@@ -6,26 +6,31 @@ Current local commands:
 bash scripts/submit_experiment.sh TPCHECK
 ```
 
-Environment setup:
+Clean venv setup:
 ```bash
 cd /home/akashpt/DeepSeekRun/structured_cpu_run_clean
-
 module load python/3.12.1
-rm -rf .venv
-bash scripts/setup_venv.sh
+bash scripts/setup_venv.sh --reset
+```
 
+`--reset` removes any existing `.venv` automatically and recreates it.
+Without `--reset`, the script refuses to overwrite an existing `.venv`.
+
+Clean venv validation:
+```bash
 .venv/bin/python -c "import torch; print('torch', torch.__version__)"
-bash scripts/submit_experiment.sh TPCHECK
 .venv/bin/python scripts/inference_import_smoke.py --resolved-config results_clean/resolved_configs/TPCHECK_resolved.env
+.venv/bin/python scripts/model_preflight.py --resolved-config results_clean/resolved_configs/TPCHECK_resolved.env
 PYTHON=.venv/bin/python bash scripts/run_case.sh results_clean/resolved_configs/TPCHECK_resolved.env
 ```
 
 If you are not using an Lmod Python module, pass an explicit interpreter:
 ```bash
 PYTHON_BIN=/path/to/python3.12 bash scripts/setup_venv.sh
+PYTHON_BIN=/path/to/python3.12 bash scripts/setup_venv.sh --reset
 ```
 
-If setup failed partway, remove the partial venv before retrying:
+If setup failed partway and you do not want `--reset`, remove the partial venv before retrying:
 ```bash
 rm -rf .venv
 ```
@@ -63,6 +68,16 @@ Native CPU inference import smoke test:
 ```bash
 .venv/bin/python scripts/inference_import_smoke.py --resolved-config results_clean/resolved_configs/TPCHECK_resolved.env
 ```
+
+Model preflight (no model construction, no weight loading):
+```bash
+.venv/bin/python scripts/model_preflight.py --resolved-config results_clean/resolved_configs/TPCHECK_resolved.env
+.venv/bin/python scripts/model_preflight.py --resolved-config results_clean/resolved_configs/TPCHECK_resolved.env --format json
+```
+
+`model_preflight.py` inspects the environment, paths, override imports, model
+directory metadata, ModelArgs / Transformer signatures, and module globals. It
+does not instantiate Transformer and does not load weights.
 
 Default `parse_config.sh` output is human-readable.
 

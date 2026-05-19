@@ -1,6 +1,6 @@
 # Migration
 
-Current phase: clean venv setup and README polish.
+Current phase: native inference preflight layer.
 
 Completed:
 - Skeleton repo created and pushed.
@@ -14,13 +14,17 @@ Completed:
 - Python verification reference inspector added.
 - Mock verification runner added.
 - Native CPU inference import smoke test with old known-good venv.
+- Clean venv setup script with `--reset`.
+- Shared `src/clean_inference/` utilities (config parsing, override import setup, model-directory inspection).
+- Import smoke refactor onto shared utilities.
+- Model preflight script (`scripts/model_preflight.py`).
 
-Next planned phase: create clean venv and rerun `inference_import_smoke.py` using `.venv/bin/python`.
+Next planned phase: model construction smoke test (first explicit `Transformer(ModelArgs(...))` instantiation with controlled minimal args and no weight loading).
 
 Not yet started:
-- Model construction.
+- Transformer construction.
 - Weight loading.
 - `torch.distributed` launch.
 - Real token generation.
 
-No code has been copied yet.
+No DeepSeek model code has been copied yet. The clean override modules in `src/overrides/` are owned by the clean lane.

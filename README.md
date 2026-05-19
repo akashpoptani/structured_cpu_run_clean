@@ -18,6 +18,9 @@ Implemented:
 - Verification reference data.
 - Mock verification runner.
 - Clean override import smoke test.
+- Clean venv setup script with `--reset`.
+- Shared `src/clean_inference/` config/import/file-inspection helpers.
+- Native CPU inference preflight script.
 
 Not implemented yet:
 
@@ -28,17 +31,24 @@ Not implemented yet:
 
 ## Current Command Flow
 
-```bash
-bash scripts/submit_experiment.sh TPCHECK
-bash scripts/run_case.sh results_clean/resolved_configs/TPCHECK_resolved.env
-.venv/bin/python scripts/inference_import_smoke.py --resolved-config results_clean/resolved_configs/TPCHECK_resolved.env
-```
-
 Create the clean venv first:
 
 ```bash
-bash scripts/setup_venv.sh
+module load python/3.12.1
+bash scripts/setup_venv.sh --reset
 ```
+
+Recommended validation flow:
+
+```bash
+bash scripts/submit_experiment.sh TPCHECK
+.venv/bin/python -c "import torch; print('torch', torch.__version__)"
+.venv/bin/python scripts/inference_import_smoke.py --resolved-config results_clean/resolved_configs/TPCHECK_resolved.env
+.venv/bin/python scripts/model_preflight.py --resolved-config results_clean/resolved_configs/TPCHECK_resolved.env
+PYTHON=.venv/bin/python bash scripts/run_case.sh results_clean/resolved_configs/TPCHECK_resolved.env
+```
+
+`model_preflight.py` is the current last preflight gate before model construction. It does not instantiate `Transformer` and does not load weights. See `docs/INFERENCE.md` for the full bring-up stage list.
 
 ## Directory Map
 

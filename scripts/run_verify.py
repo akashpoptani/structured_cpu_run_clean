@@ -5,12 +5,21 @@ import argparse
 import hashlib
 import json
 import random
-import shlex
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+SCRIPT_DIR = Path(__file__).resolve().parent
+CLEAN_ROOT = SCRIPT_DIR.parent
+if str(CLEAN_ROOT) not in sys.path:
+    sys.path.insert(0, str(CLEAN_ROOT))
+
 from inspect_reference_cases import load_case
+from src.clean_inference.config import (
+    parse_resolved_env as _shared_parse_resolved_env,
+    require_config_keys,
+    resolve_path,
+)
 
 
 REQUIRED_CONFIG_KEYS = (
@@ -41,53 +50,9 @@ def fail(message: str) -> None:
 
 
 def parse_resolved_env(path: Path) -> Dict[str, str]:
-    if not path.exists():
-        fail(f"resolved config does not exist: {path}")
-    if not path.is_file():
-        fail(f"resolved config is not a file: {path}")
-
-    config: Dict[str, str] = {}
-    try:
-        lines = path.read_text(encoding="utf-8").splitlines()
-    except OSError as exc:
-        fail(f"could not read resolved config {path}: {exc}")
-
-    for line_number, raw_line in enumerate(lines, start=1):
-        line = raw_line.strip()
-        if not line or line.startswith("#"):
-            continue
-        if "=" not in line:
-            fail(f"{path}:{line_number}: expected KEY=VALUE")
-
-        key, value_part = line.split("=", 1)
-        key = key.strip()
-        value_part = value_part.strip()
-        if not key:
-            fail(f"{path}:{line_number}: empty key")
-
-        if value_part == "":
-            value = ""
-        else:
-            try:
-                parsed = shlex.split(value_part)
-            except ValueError as exc:
-                fail(f"{path}:{line_number}: could not parse value for {key}: {exc}")
-            value = parsed[0] if parsed else ""
-
-        config[key] = value
-
-    for key in REQUIRED_CONFIG_KEYS:
-        if key not in config or config[key] == "":
-            fail(f"resolved config missing required key: {key}")
-
+    config = _shared_parse_resolved_env(path)
+    require_config_keys(config, REQUIRED_CONFIG_KEYS)
     return config
-
-
-def resolve_path(clean_root: Path, raw_path: str) -> Path:
-    path = Path(raw_path)
-    if path.is_absolute():
-        return path
-    return clean_root / path
 
 
 def load_reference_cases(reference_root: Path) -> List[Dict[str, Any]]:
