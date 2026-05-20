@@ -79,6 +79,28 @@ Model preflight (no model construction, no weight loading):
 directory metadata, ModelArgs / Transformer signatures, and module globals. It
 does not instantiate Transformer and does not load weights.
 
+`model_preflight.py` also loads the native DeepSeek ModelArgs JSON pointed at by
+`MODEL_ARGS_CONFIG_PATH` (default `../DeepSeek-V3.2/inference/config_671B_v3.2.json`)
+and prints which ModelArgs fields it populated and which fell back to dataclass
+defaults. The HF-style `<ACTIVE_MODEL_PATH>/config.json` is *not* consumed for
+ModelArgs; preflight only notes its existence as checkpoint metadata.
+
+Model construction smoke (constructs Transformer from the native ModelArgs JSON; no weights, no forward, no generation):
+```bash
+.venv/bin/python scripts/model_construct_smoke.py --resolved-config results_clean/resolved_configs/TPCHECK_resolved.env --max-batch-size 1 --max-seq-len 32
+```
+
+`model_construct_smoke.py` reads `MODEL_ARGS_CONFIG_PATH` (the native
+DeepSeek `config_671B_v3.2.json`), instantiates ModelArgs via
+`ModelArgs(**native_config)`, and then applies these explicit runtime
+overrides: `dtype` (from `WEIGHTS_PRECISION`), `max_batch_size` (from
+`--max-batch-size`), and `max_seq_len` (from `--max-seq-len`). It does not
+load weights, does not run forward, and does not call `torch.distributed`.
+`max_seq_len` is a runtime allocation/generation limit and must come from the
+experiment, not from the checkpoint's `max_position_embeddings`. Construction
+may still allocate full-model parameter shapes regardless of reduced batch/seq
+overrides.
+
 Default `parse_config.sh` output is human-readable.
 
 `parse_config.sh --format env` output is machine-readable and future scripts can source it.

@@ -115,7 +115,16 @@ Pipeline parallelism is schema-visible but out of scope.
 - `TP_SIZE`, `DP_SIZE`, and `EP_SIZE` describe the intended CPU sharding shape.
 - `SHARDING_MODE` is the high-level mode name used to select behavior.
 
-## 11. Precision Scope
+## 11. Native ModelArgs config
+
+`MODEL_ARGS_CONFIG_PATH` points at the native DeepSeek ModelArgs JSON consumed directly by `../DeepSeek-V3.2/inference/model.py`. Default: `../DeepSeek-V3.2/inference/config_671B_v3.2.json`.
+
+- Keys in this JSON must be `ModelArgs` field names. No alias mapping. Unknown keys are rejected loudly.
+- Paths are resolved relative to `CLEAN_ROOT` when not absolute.
+- `MODEL_ARGS_CONFIG_PATH` is *not* the HF-style `<ACTIVE_MODEL_PATH>/config.json`. The HF file is checkpoint metadata only and is not used by the native ModelArgs path.
+- `dtype`, `max_batch_size`, and `max_seq_len` must come from runtime/experiment configuration (resolved env + CLI), not from this JSON. `max_seq_len` in particular is a runtime KV/RoPE allocation limit and must not be auto-mapped from any checkpoint `max_position_embeddings` value.
+
+## 12. Precision Scope
 
 `WEIGHTS_PRECISION` and `KV_CACHE_DTYPE` are separate concepts.
 

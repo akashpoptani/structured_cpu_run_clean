@@ -21,9 +21,32 @@ CLEAN_ROOT = SCRIPT_DIR.parent
 if str(CLEAN_ROOT) not in sys.path:
     sys.path.insert(0, str(CLEAN_ROOT))
 
-from src.clean_inference.config import parse_resolved_env, require_config_keys
+from src.clean_inference.config import parse_resolved_env, require_config_keys, resolve_path
 from src.clean_inference.imports import import_deepseek_modules
 from src.clean_inference.model_files import inspect_model_path
+from src.clean_inference.model_config import (
+    load_native_modelargs_config,
+    modelargs_from_native_config,
+    summarize_modelargs,
+)
+
+
+NATIVE_HIGHLIGHT_FIELDS = (
+    "n_layers",
+    "dim",
+    "n_heads",
+    "n_routed_experts",
+    "n_shared_experts",
+    "n_activated_experts",
+    "max_seq_len",
+    "max_batch_size",
+    "dtype",
+    "scale_fmt",
+    "q_lora_rank",
+    "kv_lora_rank",
+    "index_n_heads",
+    "index_topk",
+)
 
 
 REQUIRED_KEYS = (
@@ -31,6 +54,7 @@ REQUIRED_KEYS = (
     "CLEAN_ROOT",
     "DEEPSEEK_REPO",
     "ACTIVE_MODEL_PATH",
+    "MODEL_ARGS_CONFIG_PATH",
 )
 
 
@@ -164,6 +188,46 @@ def _inspect_symbols(model_module: Any) -> Dict[str, bool]:
     return out
 
 
+def _inspect_native_modelargs(model_module: Any, native_config_path: Path) -> Dict[str, Any]:
+    """Load native ModelArgs JSON and report what it populates / leaves defaulted."""
+    if not native_config_path.is_file():
+        return {
+            "present": False,
+            "reason": "native ModelArgs config not found",
+            "config_path": str(native_config_path),
+        }
+
+    native_config = load_native_modelargs_config(native_config_path)
+    args, report = modelargs_from_native_config(model_module, native_config)
+    summary = summarize_modelargs(args)
+
+    highlight = {name: summary.get(name) for name in NATIVE_HIGHLIGHT_FIELDS}
+
+    return {
+        "present": True,
+        "config_path": str(native_config_path),
+        "config_filename": native_config_path.name,
+        "source": report["source"],
+        "native_fields": report["native_fields"],
+        "defaulted": report["defaulted"],
+        "modelargs_summary": {k: str(v) for k, v in summary.items()},
+        "highlight": {k: str(v) for k, v in highlight.items()},
+    }
+
+
+def _inspect_hf_config_note(model_path: Path) -> Dict[str, Any]:
+    """Note whether the HF-style checkpoint config.json exists. Not consumed."""
+    hf_path = model_path / "config.json"
+    return {
+        "hf_config_path": str(hf_path),
+        "hf_config_exists": hf_path.is_file(),
+        "note": (
+            "HF-style config.json under ACTIVE_MODEL_PATH is checkpoint metadata "
+            "only and is not consumed by the native ModelArgs path."
+        ),
+    }
+
+
 CONSTRUCTION_RISK_NOTES = (
     "Transformer construction is not attempted in this script.",
     "Construction may allocate parameters and KV caches depending on ModelArgs.",
@@ -201,11 +265,16 @@ def build_summary(resolved_config_path: Path) -> Dict[str, Any]:
         "model": str(bundle["model_file"]),
     }
 
+    native_config_path = resolve_path(clean_root, config["MODEL_ARGS_CONFIG_PATH"]).resolve()
+    paths_summary["MODEL_ARGS_CONFIG_PATH"] = str(native_config_path)
+
     model_files_info = inspect_model_path(active_model_path)
     symbols = _inspect_symbols(model_module)
     modelargs = _inspect_modelargs(model_module)
     signatures = _inspect_signatures(model_module)
     globals_info = _inspect_globals(model_module)
+    native_modelargs = _inspect_native_modelargs(model_module, native_config_path)
+    hf_note = _inspect_hf_config_note(active_model_path)
 
     return {
         "resolved_config_path": str(resolved_config_path),
@@ -218,6 +287,8 @@ def build_summary(resolved_config_path: Path) -> Dict[str, Any]:
         "modelargs": modelargs,
         "signatures": signatures,
         "model_globals": globals_info,
+        "native_modelargs": native_modelargs,
+        "hf_config_note": hf_note,
         "construction_risk_notes": list(CONSTRUCTION_RISK_NOTES),
     }
 
@@ -301,6 +372,29 @@ def print_human(summary: Dict[str, Any]) -> None:
             print(f"  {name}: <not present>")
         else:
             print(f"  {name}: {value}")
+    print()
+
+    nm = summary["native_modelargs"]
+    print(f"ModelArgs source: native {nm.get('config_filename', '<missing>')}")
+    print(f"  MODEL_ARGS_CONFIG_PATH: {nm['config_path']}")
+    if not nm["present"]:
+        print(f"  status: not loaded ({nm.get('reason', 'unknown')})")
+    else:
+        print(f"  native config fields ({len(nm['native_fields'])}): {nm['native_fields']}")
+        print(f"  defaulted ModelArgs fields ({len(nm['defaulted'])}): {nm['defaulted']}")
+        print("  highlight ModelArgs fields:")
+        for name in NATIVE_HIGHLIGHT_FIELDS:
+            print(f"    {name}: {nm['highlight'].get(name)}")
+        print("  resulting ModelArgs summary:")
+        for name, value in nm["modelargs_summary"].items():
+            print(f"    {name}: {value}")
+    print()
+
+    hf = summary["hf_config_note"]
+    print("HF checkpoint metadata note:")
+    print(f"  {hf['hf_config_path']}")
+    print(f"  exists: {hf['hf_config_exists']}")
+    print(f"  {hf['note']}")
     print()
 
     print("Construction risk notes:")
