@@ -21,6 +21,8 @@ Implemented:
 - Clean venv setup script with `--reset`.
 - Shared `src/clean_inference/` config/import/file-inspection helpers.
 - Native CPU inference preflight script.
+- Model construction smoke (native ModelArgs JSON, no weights).
+- First real native TP2 verification path: `scripts/native_verify.py` + `scripts/run_native_distributed.sh` + `TPCHECKREAL` config + `REAL_RUN` gate.
 
 Not implemented yet:
 

@@ -16,11 +16,11 @@ The clean lane brings up native CPU DeepSeek-V3.2 inference in small, reviewable
 3. **Model construction smoke** — `scripts/model_construct_smoke.py`.
    First explicit `Transformer(ModelArgs(...))` instantiation. Reads the native DeepSeek ModelArgs JSON at `MODEL_ARGS_CONFIG_PATH` (default `../DeepSeek-V3.2/inference/config_671B_v3.2.json`), instantiates via `ModelArgs(**native_config)`, and applies explicit runtime overrides: `dtype` (from `WEIGHTS_PRECISION`), `max_batch_size` (CLI), `max_seq_len` (CLI). Does not load weights, does not call `forward`, does not call `torch.distributed`. Reports parameter count, parameter dtype counts, and whether buffers exist. Construction may still allocate full-model parameter shapes regardless of reduced batch/seq overrides.
 
-4. **Weight loading** — future.
-   First real weight load from `ACTIVE_MODEL_PATH` (fp8 or bf16, derived from `WEIGHTS_PRECISION`).
+4. **Weight loading** — `scripts/native_verify.py --no-generate`.
+   First real safetensor weight load into a constructed `Transformer`. Reads the rank-aware per-shard file `model{rank}-mp{world_size}.safetensors` under `SHARDED_CKPT_PATH` via `safetensors.torch.load_model` with `strict=False`. Missing/unexpected keys are reported, not silenced. Optional `DEQUANT_FP8_WEIGHTS=all` pre-dequantizes every FP8 Linear to BF16 in place once at load (TP2 token-exact baseline). Must run inside a 2-node Slurm allocation for TP2.
 
-5. **Real token generation** — future.
-   First end-to-end greedy decode on a clean-lane reference case, comparing generated token IDs against `expected_output_token_ids`.
+5. **Real token generation** — `scripts/native_verify.py` (no flag).
+   First end-to-end greedy decode against a clean-lane reference case. Tokenizes the prompt (`add_special_tokens=False`), runs prefill + Lout single-token decode steps, argmax greedy, compares generated IDs to `expected_output_token_ids`. Rank 0 writes `results_clean/results/<TAG>/native_verify_results.json`. Targeted first config: TPCHECKREAL (prompt1, BS=1, Lin=10, Lout=15).
 
 ## Shared utilities
 
@@ -55,6 +55,23 @@ Three fields are intentionally *not* read from the native JSON and must come fro
 - `max_seq_len` — from CLI / experiment config. **Not** auto-mapped from HF's `max_position_embeddings`; `max_seq_len` is a runtime KV/RoPE allocation limit, not a model capability ceiling.
 
 `ModelArgs()` defaults remain a smaller demo configuration (`n_layers=27`, `dim=2048`, `n_heads=16`, `n_routed_experts=64`). The bring-up scripts must go through `modelargs_from_native_config` so bring-up never silently uses those defaults.
+
+## TP2 distributed init ordering
+
+For `SHARDING_MODE=tp2`, `torch.distributed.init_process_group("gloo")` runs **before** `Transformer(args)` is called. DeepSeek's `model.py` reads its module-global `world_size` inside `ColumnParallelLinear.__init__` and `RowParallelLinear.__init__` to decide per-rank shard shapes; the parallel layers will be the wrong size if init happens after construction. Per-rank TP shards (e.g. `model0-mp2.safetensors`, `model1-mp2.safetensors`) are produced by `../DeepSeek-V3.2/inference/convert.py` and contain tensors already sliced to the per-rank shape, so `safetensors.torch.load_model(model, shard_path, strict=False)` does a direct copy — no key remapping at load time.
+
+For DP modes (`dp2`, `dp2_epon`) the init ordering is inverted: construction first (with the world_size=1 default so each rank builds the full replicated model), distributed init second. That branch is documented but not implemented in this first bring-up.
+
+## REAL_RUN gate
+
+`REAL_RUN=0` (default) keeps `submit_experiment.sh` in dry-run mode: the generated sbatch under `tmp/sbatch/` calls the `run_case.sh` placeholder which exercises mock verification. `REAL_RUN=1` switches `submit_experiment.sh` to generate an sbatch whose body runs:
+
+```bash
+srun --nodes=$SBATCH_NODES --ntasks=$SBATCH_NODES --ntasks-per-node=$SBATCH_TASKS_PER_NODE \
+    bash scripts/run_native_distributed.sh <resolved_config>
+```
+
+`scripts/run_native_distributed.sh` exports OMP env, computes `MASTER_ADDR`/`MASTER_PORT` from `SLURM_JOB_NODELIST`/`SLURM_JOB_ID`, and calls `torch.distributed.run` with one rank per node, which invokes `scripts/native_verify.py`. TPCHECK keeps `REAL_RUN=0`; TPCHECKREAL is the first config to set `REAL_RUN=1`.
 
 ## What preflight does not cover
 

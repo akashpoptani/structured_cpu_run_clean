@@ -85,6 +85,37 @@ and prints which ModelArgs fields it populated and which fell back to dataclass
 defaults. The HF-style `<ACTIVE_MODEL_PATH>/config.json` is *not* consumed for
 ModelArgs; preflight only notes its existence as checkpoint metadata.
 
+Native TP2 verification (REAL_RUN; must run inside a 2-node Slurm allocation):
+```bash
+bash scripts/submit_experiment.sh TPCHECKREAL                 # generates a real sbatch (does not submit)
+sbatch tmp/sbatch/TPCHECKREAL_*.sbatch                        # Akash submits manually
+```
+
+The generated `TPCHECKREAL_*.sbatch` does:
+```bash
+srun --nodes=2 --ntasks=2 --ntasks-per-node=1 \
+    bash scripts/run_native_distributed.sh results_clean/resolved_configs/TPCHECKREAL_resolved.env
+```
+
+`run_native_distributed.sh` exports OMP env, computes `MASTER_ADDR`/`MASTER_PORT` from Slurm, and runs:
+```bash
+python -m torch.distributed.run --nnodes=2 --nproc-per-node=1 --node-rank=$SLURM_NODEID \
+    --master-addr=$MASTER_ADDR --master-port=$MASTER_PORT \
+    scripts/native_verify.py --resolved-config <...> --reference-group prompt1_bs1_lin10_lout15 --case-id case_0001
+```
+
+Safe local validation (no weight load, no generation — just construction):
+```bash
+.venv/bin/python scripts/native_verify.py \
+    --resolved-config results_clean/resolved_configs/TPCHECKREAL_resolved.env \
+    --reference-group prompt1_bs1_lin10_lout15 --case-id case_0001 \
+    --no-load-weights
+```
+
+`--no-generate` is the intermediate gate: load weights but skip the decode loop. Use this from inside Slurm for a pure weight-loading smoke before attempting full generation.
+
+TPCHECK remains the mock/dry-run config (REAL_RUN=0, generates the placeholder sbatch that calls `run_case.sh`). TPCHECKREAL (REAL_RUN=1) is the first real distributed verification config.
+
 Model construction smoke (constructs Transformer from the native ModelArgs JSON; no weights, no forward, no generation):
 ```bash
 .venv/bin/python scripts/model_construct_smoke.py --resolved-config results_clean/resolved_configs/TPCHECK_resolved.env --max-batch-size 1 --max-seq-len 32

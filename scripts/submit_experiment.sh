@@ -36,7 +36,28 @@ printf '%s\n' "$RESOLVED_ENV" > "$RESOLVED_CONFIG_PATH"
 SBATCH_BASENAME="${TAG}_${RUN_MODE}_${SHARDING_MODE}_lin${LIN_TOKENS}_lout${LOUT_TOKENS}_bs${BATCH_SIZE}_n${SBATCH_NODES}_c${SBATCH_CPUS_PER_TASK}_mem${SBATCH_MEM}_tprof${TIME_PROFILE}_mprof${MEM_PROFILE}.sbatch"
 SBATCH_PATH="$SBATCH_DIR/$SBATCH_BASENAME"
 
-cat > "$SBATCH_PATH" <<EOF
+if [[ "${REAL_RUN:-0}" == "1" ]]; then
+  cat > "$SBATCH_PATH" <<EOF
+#!/usr/bin/env bash
+#SBATCH --job-name=$RUN_LABEL
+#SBATCH --nodes=$SBATCH_NODES
+#SBATCH --ntasks=$SBATCH_NODES
+#SBATCH --ntasks-per-node=$SBATCH_TASKS_PER_NODE
+#SBATCH --cpus-per-task=$SBATCH_CPUS_PER_TASK
+#SBATCH --mem=$SBATCH_MEM
+#SBATCH --time=$SBATCH_TIME
+#SBATCH --partition=$SBATCH_PARTITION
+#SBATCH --output=$OUTPUT_ROOT/logs/%x_%j.out
+#SBATCH --error=$OUTPUT_ROOT/logs/%x_%j.err
+
+set -euo pipefail
+
+echo "REAL_RUN=1: launching native distributed verification via srun."
+srun --nodes=$SBATCH_NODES --ntasks=$SBATCH_NODES --ntasks-per-node=$SBATCH_TASKS_PER_NODE \\
+    bash "$CLEAN_ROOT/scripts/run_native_distributed.sh" "$RESOLVED_CONFIG_PATH"
+EOF
+else
+  cat > "$SBATCH_PATH" <<EOF
 #!/usr/bin/env bash
 #SBATCH --job-name=$RUN_LABEL
 #SBATCH --nodes=$SBATCH_NODES
@@ -53,6 +74,7 @@ set -euo pipefail
 echo "Dry-run generated sbatch. Calling run_case.sh placeholder."
 bash "$CLEAN_ROOT/scripts/run_case.sh" "$RESOLVED_CONFIG_PATH"
 EOF
+fi
 
 echo
 echo "Generated dry-run sbatch:"

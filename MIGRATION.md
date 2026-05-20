@@ -1,6 +1,6 @@
 # Migration
 
-Current phase: model construction smoke.
+Current phase: first real native TP2 verification.
 
 Completed:
 - Skeleton repo created and pushed.
@@ -16,18 +16,27 @@ Completed:
 - Native CPU inference import smoke test with old known-good venv.
 - Clean venv setup script with `--reset`.
 - Shared `src/clean_inference/` utilities (config parsing, override import setup, model-directory inspection).
-- Import smoke refactor onto shared utilities.
 - Native inference preflight layer (`scripts/model_preflight.py`).
 - Clean venv validated end-to-end.
-- Checkpoint config mapping (`src/clean_inference/model_config.py`): initial HF-style `config.json` alias-mapper, since superseded.
 - Model construction smoke script (`scripts/model_construct_smoke.py`).
-- Switched the ModelArgs source of truth to the **native** DeepSeek JSON at `MODEL_ARGS_CONFIG_PATH` (default `../DeepSeek-V3.2/inference/config_671B_v3.2.json`). The HF-style alias mapper was removed. `ModelArgs(**native_config)` matches the upstream pattern in `inference/generate.py`. `dtype`, `max_batch_size`, and `max_seq_len` are explicit runtime overrides — `max_seq_len` is no longer auto-derived from `max_position_embeddings`.
+- Native ModelArgs JSON path (`MODEL_ARGS_CONFIG_PATH`) replacing earlier HF alias mapper.
+- TP2 distributed runtime: `src/clean_inference/native_runtime.py` (thread env, dist init ordering, ModelArgs build for case, Transformer construction).
+- TP2 weight loading: `src/clean_inference/weight_loading.py` (rank-aware safetensor shard load via `safetensors.torch.load_model`; missing/unexpected keys reported; optional pre-dequant of FP8 to BF16).
+- Tokenizer loading: `src/clean_inference/tokenization.py` (`PreTrainedTokenizerFast` from `tokenizer.json`, special-token kwargs from `tokenizer_config.json`, `add_special_tokens=False`).
+- Greedy decode loop: `src/clean_inference/generation.py` (prefill + per-token decode, `logits.argmax(-1)`).
+- Clean re-write of `dequant_weights.py` into `src/overrides/dequant_weights.py` (block-broadcast FP8 → BF16, no `repeat_interleave` grid).
+- `scripts/native_verify.py` (full pipeline with `--no-load-weights` and `--no-generate` safety flags).
+- `scripts/run_native_distributed.sh` (torchrun launcher mirroring the legacy srun shape).
+- `REAL_RUN` gate in `_baseline.env` / `parse_config.sh` / `submit_experiment.sh`. `REAL_RUN=1` generates a real-distributed sbatch that calls `run_native_distributed.sh`; `REAL_RUN=0` keeps the dry-run placeholder.
+- `SHARDED_CKPT_PATH` plumbed through (per-rank TP shard directory; empty in baseline, set in TPCHECKREAL).
+- `TPCHECKREAL` override config: tp2, fp8, BS=1, Lin=10, Lout=15, 2 nodes × 32 cores, 750G mem, 2h walltime.
 
-Next planned phase: clean weight-loading smoke (first explicit safetensor weight load into a constructed `Transformer`).
+Next planned phase: actual TPCHECKREAL run inside a 2-node Slurm allocation, in stages — `--no-load-weights` first (already runs locally), then `--no-generate` weight-load smoke, then full decode against `prompt1_bs1_lin10_lout15/case_0001.json`.
 
 Not yet started:
-- Safetensor weight loading into model.
-- `torch.distributed` launch.
-- Real token generation.
+- DP2 / DP2 EP-on clean paths.
+- Additional reference cases (BS=4, 4 prompts, logits/layer/attention/MoE outputs).
+- Perf benchmark mode (`bench` / `both` in the clean runner).
+- Profiling lane (mem + time).
 
-No DeepSeek model code has been copied yet. The clean override modules in `src/overrides/` are owned by the clean lane.
+No DeepSeek model code has been copied. `src/overrides/` contains clean re-writes (`kernel.py`, `fast_hadamard_transform.py`, `dequant_weights.py`); nothing under `../structured_cpu_run/without_vllm/overrides/` is imported at runtime. The legacy TP2 shards directory (`../structured_cpu_run/artifacts/deepseek-v3.2-mp2-active/`) is consumed only as a data path via `SHARDED_CKPT_PATH`.

@@ -115,7 +115,15 @@ Pipeline parallelism is schema-visible but out of scope.
 - `TP_SIZE`, `DP_SIZE`, and `EP_SIZE` describe the intended CPU sharding shape.
 - `SHARDING_MODE` is the high-level mode name used to select behavior.
 
-## 11. Native ModelArgs config
+## 11. REAL_RUN gate and sharded checkpoint path
+
+`REAL_RUN` controls whether `submit_experiment.sh` generates a dry-run sbatch (calls `run_case.sh` placeholder) or a real distributed sbatch (calls `scripts/run_native_distributed.sh`). Default is `0`. TPCHECKREAL sets `REAL_RUN=1`.
+
+`SHARDED_CKPT_PATH` is the directory containing per-rank converted safetensor shards (filenames `model{rank}-mp{world_size}.safetensors`), produced offline by `../DeepSeek-V3.2/inference/convert.py`. Required when `REAL_RUN=1`. Should also contain `tokenizer.json` / `tokenizer_config.json`. Empty in the baseline.
+
+`DEQUANT_FP8_WEIGHTS` controls optional pre-dequantization of FP8 weights to BF16 in place once at load. `all` matches the legacy TP2 token-exact convention; `dense` skips routed experts; `none` keeps FP8 (the per-call FP32 fallback in `src/overrides/kernel.py` runs instead).
+
+## 12. Native ModelArgs config
 
 `MODEL_ARGS_CONFIG_PATH` points at the native DeepSeek ModelArgs JSON consumed directly by `../DeepSeek-V3.2/inference/model.py`. Default: `../DeepSeek-V3.2/inference/config_671B_v3.2.json`.
 
@@ -124,7 +132,7 @@ Pipeline parallelism is schema-visible but out of scope.
 - `MODEL_ARGS_CONFIG_PATH` is *not* the HF-style `<ACTIVE_MODEL_PATH>/config.json`. The HF file is checkpoint metadata only and is not used by the native ModelArgs path.
 - `dtype`, `max_batch_size`, and `max_seq_len` must come from runtime/experiment configuration (resolved env + CLI), not from this JSON. `max_seq_len` in particular is a runtime KV/RoPE allocation limit and must not be auto-mapped from any checkpoint `max_position_embeddings` value.
 
-## 12. Precision Scope
+## 13. Precision Scope
 
 `WEIGHTS_PRECISION` and `KV_CACHE_DTYPE` are separate concepts.
 
