@@ -32,11 +32,12 @@ checkpoint); the block-broadcast form runs in seconds.
 Scopes:
   - "all"   — every FP8 Linear in the model. ~2x memory per converted weight.
               Required for TP2 token-exact baseline.
-  - "dense" — skip routed experts (matched by ".experts." but not
-              ".shared_experts." in the qualified name). For modes where
-              fully dequantizing experts to BF16 would not fit memory.
   - "none"  — skip; FP8 stays FP8. The per-call FP32 fallback in
               `kernel.fp8_gemm` runs instead.
+
+(The legacy lane also supported a "dense" scope for DP2 EP-off memory limits.
+That mode is out of scope for the clean lane right now and has been removed
+to keep the path narrow. Re-introduce it if and when DP2 EP-off lands.)
 """
 
 import gc
@@ -56,7 +57,25 @@ def _dequantize_fp8_block(
     scale_fp32: torch.Tensor,
     block_size: int = DEFAULT_BLOCK_SIZE,
 ) -> torch.Tensor:
-    """Block-broadcast FP8 -> BF16 dequant. Handles ragged out/in dims."""
+    """Block-broadcast FP8 -> BF16 dequant. Handles ragged out/in dims.
+
+    Shapes:
+      weight_fp8:   (out_features, in_features), dtype=float8_e4m3fn
+      scale_fp32:   (s_out, s_in) where s_out = ceildiv(out_features, block_size)
+                                  and  s_in  = ceildiv(in_features,  block_size)
+
+    Operation (block dequant pattern):
+      - The scale_fp32 tensor is the per-block scale grid. After viewing
+        the (padded) weight as (s_out, block, s_in, block), the per-block
+        scale is broadcast across the two intra-block dimensions:
+          weight_view[s_out, :, s_in, :] *= scale_fp32[s_out, s_in]
+      - Reshape back to (s_out*block, s_in*block) and trim back to the
+        original (out_features, in_features) if padding was added.
+
+    This is the proven block-aware dequant kernel. It deliberately avoids
+    `repeat_interleave` (which would materialize a full (out, in) FP32 scale
+    grid — historically the dominant cost in the legacy lane).
+    """
     out_features, in_features = weight_fp8.shape
     s_out, s_in = scale_fp32.shape
     pad_out = s_out * block_size - out_features
@@ -68,23 +87,15 @@ def _dequantize_fp8_block(
     else:
         padded = weight_fp8
 
-    bf16 = (
-        padded.float()
-        .view(s_out, block_size, s_in, block_size)
-        .mul_(scale_fp32.view(s_out, 1, s_in, 1))
-        .to(torch.bfloat16)
-        .reshape(s_out * block_size, s_in * block_size)
-    )
+    bf16 = ((padded.float()
+             .view(s_out, block_size, s_in, block_size)
+             * scale_fp32.view(s_out, 1, s_in, 1))
+            .to(torch.bfloat16)
+            .reshape(s_out * block_size, s_in * block_size))
 
     if pad_out or pad_in:
         return bf16[:out_features, :in_features].contiguous()
     return bf16
-
-
-def _is_routed_expert_param(qualified_name: str) -> bool:
-    """True for routed-expert weights (matched by '.experts.' but excluding
-    the dense fallback under '.shared_experts.')."""
-    return ".experts." in qualified_name and ".shared_experts." not in qualified_name
 
 
 def dequantize_fp8_weights(
@@ -99,14 +110,13 @@ def dequantize_fp8_weights(
     """
     if scope == "none":
         log_fn("[dequant] scope=none -> skip; FP8 weights stay FP8")
-        return {"dequant_count": 0, "skipped_expert": 0, "bytes_freed_fp8": 0, "bytes_added_bf16": 0}
-    if scope not in ("all", "dense"):
-        raise ValueError(f"unsupported scope={scope!r}; expected one of 'all', 'dense', 'none'")
+        return {"dequant_count": 0, "bytes_freed_fp8": 0, "bytes_added_bf16": 0}
+    if scope != "all":
+        raise ValueError(f"unsupported scope={scope!r}; expected one of 'all', 'none'")
 
     t0 = time.perf_counter()
     stats = {
         "dequant_count": 0,
-        "skipped_expert": 0,
         "bytes_freed_fp8": 0,
         "bytes_added_bf16": 0,
     }
@@ -120,11 +130,6 @@ def dequantize_fp8_weights(
         scale = getattr(module, "scale", None)
         if not isinstance(scale, nn.Parameter):
             log_fn(f"[dequant] WARN: FP8 weight {module_name}.weight has no .scale Parameter; skipping")
-            continue
-
-        qualified = f"{module_name}.weight"
-        if scope == "dense" and _is_routed_expert_param(qualified):
-            stats["skipped_expert"] += 1
             continue
 
         numel = weight.data.numel()
@@ -155,11 +160,11 @@ def dequantize_fp8_weights(
     net = (stats["bytes_added_bf16"] - stats["bytes_freed_fp8"]) / 1e9
     log_fn(
         f"[dequant] scope={scope}: dequantized {stats['dequant_count']} weights "
-        f"in {elapsed:.2f}s (skipped_expert={stats['skipped_expert']}; "
-        f"mem net +{net:.1f} GB)"
+        f"in {elapsed:.2f}s (mem net +{net:.1f} GB)"
     )
     return stats
 
 
 def get_scope_from_env(default: str = "all") -> str:
+    """Read DEQUANT_FP8_WEIGHTS env var. Only 'all' or 'none' are supported."""
     return os.environ.get("DEQUANT_FP8_WEIGHTS", default).lower()

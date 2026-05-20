@@ -85,36 +85,49 @@ and prints which ModelArgs fields it populated and which fell back to dataclass
 defaults. The HF-style `<ACTIVE_MODEL_PATH>/config.json` is *not* consumed for
 ModelArgs; preflight only notes its existence as checkpoint metadata.
 
-Native TP2 verification (REAL_RUN; must run inside a 2-node Slurm allocation):
-```bash
-bash scripts/submit_experiment.sh TPCHECKREAL                 # generates a real sbatch (does not submit)
-sbatch tmp/sbatch/TPCHECKREAL_*.sbatch                        # Akash submits manually
-```
+## Staged TPCHECKREAL real-run sequence
 
-The generated `TPCHECKREAL_*.sbatch` does:
-```bash
-srun --nodes=2 --ntasks=2 --ntasks-per-node=1 \
-    bash scripts/run_native_distributed.sh results_clean/resolved_configs/TPCHECKREAL_resolved.env
-```
+No `sbatch` is submitted automatically — Akash submits each stage manually. TPCHECK stays as the mock/dry-run config; TPCHECKREAL is the real config.
 
-`run_native_distributed.sh` exports OMP env, computes `MASTER_ADDR`/`MASTER_PORT` from Slurm, and runs:
-```bash
-python -m torch.distributed.run --nnodes=2 --nproc-per-node=1 --node-rank=$SLURM_NODEID \
-    --master-addr=$MASTER_ADDR --master-port=$MASTER_PORT \
-    scripts/native_verify.py --resolved-config <...> --reference-group prompt1_bs1_lin10_lout15 --case-id case_0001
-```
-
-Safe local validation (no weight load, no generation — just construction):
+### Stage 1 — Safe construct-only local check (no Slurm, no weights)
 ```bash
 .venv/bin/python scripts/native_verify.py \
     --resolved-config results_clean/resolved_configs/TPCHECKREAL_resolved.env \
-    --reference-group prompt1_bs1_lin10_lout15 --case-id case_0001 \
+    --reference-group prompt1_bs1_lin10_lout15 \
     --no-load-weights
 ```
+Run after `bash scripts/submit_experiment.sh TPCHECKREAL` regenerates the resolved config. Confirms model construction + ModelArgs source under the real config.
 
-`--no-generate` is the intermediate gate: load weights but skip the decode loop. Use this from inside Slurm for a pure weight-loading smoke before attempting full generation.
+### Stage 2 — Slurm weight-load-only smoke (NATIVE_NO_GENERATE=1)
+Edit `scripts/configs/TPCHECKREAL_*.env`, set `NATIVE_NO_GENERATE=1`, then:
+```bash
+bash scripts/submit_experiment.sh TPCHECKREAL          # regenerates resolved_config + sbatch
+sbatch tmp/sbatch/TPCHECKREAL_*.sbatch                 # Akash submits
+```
+`run_native_distributed.sh` reads `NATIVE_NO_GENERATE=1` from the resolved env and passes `--no-generate` to `native_verify.py`. Validates rank-aware shard loading + optional pre-dequant. Reset to `0` for Stage 3.
 
-TPCHECK remains the mock/dry-run config (REAL_RUN=0, generates the placeholder sbatch that calls `run_case.sh`). TPCHECKREAL (REAL_RUN=1) is the first real distributed verification config.
+### Stage 3 — Full decode (defaults)
+With `NATIVE_NO_LOAD_WEIGHTS=0` and `NATIVE_NO_GENERATE=0`:
+```bash
+bash scripts/submit_experiment.sh TPCHECKREAL
+sbatch tmp/sbatch/TPCHECKREAL_*.sbatch
+```
+Loads weights, tokenizes the prompt(s), runs greedy decode for `Lout` tokens, and compares against `expected_output_token_ids` for every case in `--reference-group prompt1_bs1_lin10_lout15`. Result JSON written to `results_clean/results/TPCHECKREAL/native_verify_results.json` (rank 0).
+
+### Inside the generated sbatch
+```bash
+srun --nodes=$SBATCH_NODES --ntasks=$SBATCH_NODES --ntasks-per-node=1 \
+    bash scripts/run_native_distributed.sh <resolved_config>
+```
+Which invokes:
+```bash
+python -m torch.distributed.run --nnodes=$SBATCH_NODES --nproc-per-node=1 \
+    --node-rank=$SLURM_NODEID --master-addr=$MASTER_ADDR --master-port=$MASTER_PORT \
+    scripts/native_verify.py --resolved-config <...> --reference-group prompt1_bs1_lin10_lout15
+```
+`--case-id` is omitted by default so every case in the group is run sequentially against the constructed/loaded model. Set `NATIVE_CASE_ID=case_0001` (env var to the launcher) to restrict to one case.
+
+TPCHECK remains the mock/dry-run config (`REAL_RUN=0`, generates the placeholder sbatch that calls `run_case.sh`). TPCHECKREAL (`REAL_RUN=1`) is the first real distributed verification config.
 
 Model construction smoke (constructs Transformer from the native ModelArgs JSON; no weights, no forward, no generation):
 ```bash

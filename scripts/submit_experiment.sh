@@ -47,6 +47,7 @@ if [[ "${REAL_RUN:-0}" == "1" ]]; then
 #SBATCH --mem=$SBATCH_MEM
 #SBATCH --time=$SBATCH_TIME
 #SBATCH --partition=$SBATCH_PARTITION
+#SBATCH --account=$SBATCH_ACCOUNT
 #SBATCH --output=$OUTPUT_ROOT/logs/%x_%j.out
 #SBATCH --error=$OUTPUT_ROOT/logs/%x_%j.err
 
@@ -66,6 +67,7 @@ else
 #SBATCH --mem=$SBATCH_MEM
 #SBATCH --time=$SBATCH_TIME
 #SBATCH --partition=$SBATCH_PARTITION
+#SBATCH --account=$SBATCH_ACCOUNT
 #SBATCH --output=$OUTPUT_ROOT/logs/%x_%j.out
 #SBATCH --error=$OUTPUT_ROOT/logs/%x_%j.err
 

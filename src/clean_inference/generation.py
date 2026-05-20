@@ -1,6 +1,7 @@
 """Greedy decode for one reference case (batch size 1).
 
-Matches the legacy verify_cpu.py decode loop exactly so token IDs reproduce.
+Matches the upstream DeepSeek generate.py shape and the legacy verify_cpu.py
+loop exactly so token IDs reproduce against the GPU reference.
 
 Loop shape:
     total_len = len(prompt_tokens) + lout
@@ -14,9 +15,20 @@ Loop shape:
         prev_pos = cur_pos
     return tokens[0, len(prompt_tokens):].tolist()
 
-The first iteration is the prefill (Lin tokens); each subsequent iteration
-passes exactly one new token. No KV cache management at the Python level —
-the upstream model.py owns the cache via prev_pos / cur_pos.
+Why this loop is deliberately bare:
+  - This is the native DeepSeek generate.py / legacy verify shape. Re-implementing
+    the same shape is the safest path to token-exact reproduction.
+  - We intentionally do not manage the KV cache in Python. Upstream
+    DeepSeek `model.py` owns the cache and RoPE position via
+    `start_pos = prev_pos`; passing `tokens[:, prev_pos:cur_pos]` plus
+    `prev_pos` is enough for it to grow the cache by exactly the new
+    token(s) and read past keys at the right offsets.
+  - For TP2 the forward / logits path handles the distributed parallel
+    layers internally — the Python loop is identical to the single-rank
+    case.
+  - For DP / EP modes later, rank/output coordination may be needed
+    (currently DP rank deduplication happens inside MoE.forward), but that
+    is out of scope for the first TP2 clean lane.
 """
 
 import sys

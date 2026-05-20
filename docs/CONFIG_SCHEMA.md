@@ -121,7 +121,7 @@ Pipeline parallelism is schema-visible but out of scope.
 
 `SHARDED_CKPT_PATH` is the directory containing per-rank converted safetensor shards (filenames `model{rank}-mp{world_size}.safetensors`), produced offline by `../DeepSeek-V3.2/inference/convert.py`. Required when `REAL_RUN=1`. Should also contain `tokenizer.json` / `tokenizer_config.json`. Empty in the baseline.
 
-`DEQUANT_FP8_WEIGHTS` controls optional pre-dequantization of FP8 weights to BF16 in place once at load. `all` matches the legacy TP2 token-exact convention; `dense` skips routed experts; `none` keeps FP8 (the per-call FP32 fallback in `src/overrides/kernel.py` runs instead).
+`DEQUANT_FP8_WEIGHTS` controls optional pre-dequantization of FP8 weights to BF16 in place once at load. Supported values are `all` (matches the legacy TP2 token-exact convention) and `none` (keeps FP8; the per-call FP32 fallback in `src/overrides/kernel.py` runs instead). The legacy `dense` scope is intentionally not exposed in the clean lane until DP2 EP-off support lands.
 
 ## 12. Native ModelArgs config
 
