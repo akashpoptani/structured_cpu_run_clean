@@ -62,16 +62,26 @@ For `SHARDING_MODE=tp2`, `torch.distributed.init_process_group("gloo")` runs **b
 
 For DP modes (`dp2`, `dp2_epon`) the init ordering is inverted: construction first (with the world_size=1 default so each rank builds the full replicated model), distributed init second. That branch is documented but not implemented in this first bring-up.
 
-## REAL_RUN gate
+## Launcher
 
-`REAL_RUN=0` (default) keeps `submit_experiment.sh` in dry-run mode: the generated sbatch under `tmp/sbatch/` calls the `run_case.sh` placeholder which exercises mock verification. `REAL_RUN=1` switches `submit_experiment.sh` to generate an sbatch whose body runs:
+`submit_experiment.sh <TAG>` is the single user entry point. It validates the config, snapshots the resolved env, writes an sbatch whose body is:
 
 ```bash
 srun --nodes=$SBATCH_NODES --ntasks=$SBATCH_NODES --ntasks-per-node=$SBATCH_TASKS_PER_NODE \
     bash scripts/run_native_distributed.sh <resolved_config>
 ```
 
-`scripts/run_native_distributed.sh` exports OMP env, computes `MASTER_ADDR`/`MASTER_PORT` from `SLURM_JOB_NODELIST`/`SLURM_JOB_ID`, and calls `torch.distributed.run` with one rank per node, which invokes `scripts/native_verify.py`. TPCHECK keeps `REAL_RUN=0`; TPCHECKREAL is the first config to set `REAL_RUN=1`.
+then calls `sbatch` and records the job id. `REAL_RUN=1` is the baseline default; the placeholder dry-run path through `run_case.sh` is no longer reachable through the main launcher and remains only as earlier-bring-up debug code.
+
+`scripts/run_native_distributed.sh` exports OMP env, computes `MASTER_ADDR`/`MASTER_PORT` from `SLURM_JOB_NODELIST`/`SLURM_JOB_ID`, and calls `torch.distributed.run` with one rank per node, which invokes `scripts/native_verify.py`.
+
+The current real-run targets are three TPCHECKREAL variants:
+
+| Tag | NATIVE_NO_LOAD_WEIGHTS | NATIVE_NO_GENERATE | Purpose |
+|---|---|---|---|
+| `TPCHECKREAL_NOLOAD` | 1 | 0 | construct only |
+| `TPCHECKREAL_NOGEN` | 0 | 1 | weight load only |
+| `TPCHECKREAL` | 0 | 0 | full token-exact decode (known-good) |
 
 ## What preflight does not cover
 

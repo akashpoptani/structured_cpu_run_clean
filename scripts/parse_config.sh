@@ -86,8 +86,18 @@ require_one_of FORMAT "$FORMAT" human env
 
 [[ -f "$BASELINE_CONFIG" ]] || die "baseline config not found: $BASELINE_CONFIG"
 
+# A tag match requires the filename to be <TAG>_<runmode>_... so e.g.
+# TPCHECKREAL does not silently pick up TPCHECKREAL_NOLOAD / TPCHECKREAL_NOGEN.
 shopt -s nullglob
-override_matches=("$CONFIG_DIR/${TAG}"_*.env)
+override_matches=()
+for candidate in "$CONFIG_DIR/${TAG}"_*.env; do
+  rest="${candidate##*/${TAG}_}"
+  case "$rest" in
+    verify_*.env|bench_*.env|both_*.env|generate_*.env)
+      override_matches+=("$candidate")
+      ;;
+  esac
+done
 shopt -u nullglob
 
 if [[ "${#override_matches[@]}" -eq 0 ]]; then

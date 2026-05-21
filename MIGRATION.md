@@ -1,6 +1,6 @@
 # Migration
 
-Current phase: first real native TP2 verification.
+Current phase: first real native TP2 verification — **token-exact PASS** (case_0001, 15/15 tokens, job 27216172 on lh1800-1801; c=16, mem=400G, fp8 weights, DEQUANT_FP8_WEIGHTS=none; 3786 s wall).
 
 Completed:
 - Skeleton repo created and pushed.

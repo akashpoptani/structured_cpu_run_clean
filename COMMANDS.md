@@ -1,9 +1,34 @@
 # Commands
 
-Current local commands:
+See [README.md](README.md) for the full flow. This file is the terse command index.
+
+## Real native runs (current)
 
 ```bash
-bash scripts/submit_experiment.sh TPCHECK
+bash scripts/submit_experiment.sh TPCHECKREAL_NOLOAD   # construct only, ~few seconds wall
+bash scripts/submit_experiment.sh TPCHECKREAL_NOGEN    # weight-load only, ~5-10 min wall
+bash scripts/submit_experiment.sh TPCHECKREAL          # full token-exact decode, ~60 min wall
+```
+
+`submit_experiment.sh <TAG>` is the single user command. It validates the config, writes the resolved env snapshot, writes the sbatch, calls `sbatch`, captures the job id, and writes run metadata under `results_clean/runs/<TAG>/<JOB_ID>/`. Do not call `sbatch` directly.
+
+After submit:
+
+```bash
+cat .last_job                       # latest submitted JOB_ID
+cat .last_sbatch                    # latest generated sbatch path
+cat .last_resolved_config           # latest resolved env path
+squeue -j "$(cat .last_job)"
+tail -F results_clean/logs/TPCHECKREAL_$(cat .last_job).out
+cat results_clean/results/TPCHECKREAL/native_verify_results.json
+```
+
+## Legacy mock path (earlier bring-up stage, not the main launcher)
+
+`TPCHECK` was the original mock/dry-run config. It still exists but submitting it now also goes through the real-distributed sbatch (`REAL_RUN=1` is the new baseline default). For the in-process mock verification runner used during early bring-up:
+
+```bash
+PYTHON=.venv/bin/python bash scripts/run_case.sh results_clean/resolved_configs/TPCHECK_resolved.env
 ```
 
 Clean venv setup:

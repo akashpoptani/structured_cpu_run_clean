@@ -117,7 +117,7 @@ Pipeline parallelism is schema-visible but out of scope.
 
 ## 11. REAL_RUN gate and sharded checkpoint path
 
-`REAL_RUN` controls whether `submit_experiment.sh` generates a dry-run sbatch (calls `run_case.sh` placeholder) or a real distributed sbatch (calls `scripts/run_native_distributed.sh`). Default is `0`. TPCHECKREAL sets `REAL_RUN=1`.
+`REAL_RUN` is `1` by default in the baseline now. `submit_experiment.sh` always generates a real distributed sbatch that calls `scripts/run_native_distributed.sh`; the mock `run_case.sh` placeholder is no longer reachable through the main launcher. `REAL_RUN` stays plumbed through the schema so future tooling (e.g. a richer dry-run mode) can still distinguish.
 
 `SHARDED_CKPT_PATH` is the directory containing per-rank converted safetensor shards (filenames `model{rank}-mp{world_size}.safetensors`), produced offline by `../DeepSeek-V3.2/inference/convert.py`. Required when `REAL_RUN=1`. Should also contain `tokenizer.json` / `tokenizer_config.json`. Empty in the baseline.
 
