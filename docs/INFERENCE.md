@@ -83,6 +83,30 @@ The current real-run targets are three TPCHECKREAL variants:
 | `TPCHECKREAL_NOGEN` | 0 | 1 | weight load only |
 | `TPCHECKREAL` | 0 | 0 | full token-exact decode (known-good) |
 
+## RUN_MODE semantics
+
+`scripts/native_verify.py` now dispatches on the resolved-config `RUN_MODE`. Setup (dist init, Transformer construct, weight load, optional dequant, tokenizer) runs once; mode-specific post-processing follows the decode loop.
+
+| RUN_MODE | Behavior | Result file under `results_clean/results/<TAG>/` | Exit |
+|---|---|---|---|
+| `verify` | greedy decode + compare against `expected_output_token_ids` | `native_verify_results.json` | 0 iff every case passes |
+| `generate` | greedy decode, no compare; emits tokens and decoded text (reference expected tokens, if present in the case JSON, are carried through as diagnostics) | `native_generate_results.json` | 0 on completion |
+| `bench` | greedy decode + per-case TTFT / TPOT / tokens-per-second + group aggregate | `native_bench_results.json` | 0 on completion |
+| `both` | verify first; if any case fails, write verify JSON and exit 1; if every case passes, reuse the same decode timings to write bench JSON and a `native_both_results.json` summary that points to both | `native_verify_results.json` + `native_bench_results.json` + `native_both_results.json` | 0 iff verify passes |
+
+`bench` and `both` reuse the timings collected during decode (single decode pass per case). TTFT is `prefill_seconds` (first output token is emitted at the end of prefill); TPOT is `decode_seconds_total / (lout - 1)`; `tokens_per_second = lout / total_seconds`.
+
+`NATIVE_NO_LOAD_WEIGHTS=1` and `NATIVE_NO_GENERATE=1` are honored under every RUN_MODE; the result file name follows the table above but the body records what was skipped (`status: construct_only` or `status: weights_loaded_no_generation`).
+
+### Run-mode configs (TP2, fp8, DEQUANT_FP8_WEIGHTS=none, c16/500G/ramanvr)
+
+| Tag | RUN_MODE |
+|---|---|
+| `TPCHECKREAL` | `verify` (known-good token-exact) |
+| `TPGEN` | `generate` |
+| `TPBENCH` | `bench` |
+| `TPBOTH` | `both` |
+
 ## What preflight does not cover
 
 - Model construction.

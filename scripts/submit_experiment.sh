@@ -117,15 +117,26 @@ NATIVE_NO_GENERATE=$NATIVE_NO_GENERATE
 DEQUANT_FP8_WEIGHTS=$DEQUANT_FP8_WEIGHTS
 EOF
 
+case "$RUN_MODE" in
+  verify)   RESULT_LINES="  $CLEAN_ROOT/$OUTPUT_ROOT/results/$TAG/native_verify_results.json" ;;
+  generate) RESULT_LINES="  $CLEAN_ROOT/$OUTPUT_ROOT/results/$TAG/native_generate_results.json" ;;
+  bench)    RESULT_LINES="  $CLEAN_ROOT/$OUTPUT_ROOT/results/$TAG/native_bench_results.json" ;;
+  both)     RESULT_LINES="  $CLEAN_ROOT/$OUTPUT_ROOT/results/$TAG/native_verify_results.json
+  $CLEAN_ROOT/$OUTPUT_ROOT/results/$TAG/native_bench_results.json
+  $CLEAN_ROOT/$OUTPUT_ROOT/results/$TAG/native_both_results.json" ;;
+  *)        RESULT_LINES="  $CLEAN_ROOT/$OUTPUT_ROOT/results/$TAG/native_${RUN_MODE}_results.json" ;;
+esac
+
 cat <<EOF
 
 Submitted batch job $JOB_ID
 Resolved config: $RESOLVED_CONFIG_PATH
 Sbatch: $SBATCH_PATH
 Run metadata: $RUN_METADATA
+RUN_MODE: $RUN_MODE
 Logs:
   $LOG_DIR/${RUN_LABEL}_${JOB_ID}.out
   $LOG_DIR/${RUN_LABEL}_${JOB_ID}.err
-Result JSON:
-  $CLEAN_ROOT/$OUTPUT_ROOT/results/$TAG/native_verify_results.json
+Result JSON(s):
+$RESULT_LINES
 EOF

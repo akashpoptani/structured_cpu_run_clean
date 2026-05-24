@@ -7,8 +7,13 @@ See [README.md](README.md) for the full flow. This file is the terse command ind
 ```bash
 bash scripts/submit_experiment.sh TPCHECKREAL_NOLOAD   # construct only, ~few seconds wall
 bash scripts/submit_experiment.sh TPCHECKREAL_NOGEN    # weight-load only, ~5-10 min wall
-bash scripts/submit_experiment.sh TPCHECKREAL          # full token-exact decode, ~60 min wall
+bash scripts/submit_experiment.sh TPCHECKREAL          # full token-exact decode (verify), ~60 min wall
+bash scripts/submit_experiment.sh TPGEN                # generate only (no compare), ~60 min wall
+bash scripts/submit_experiment.sh TPBENCH              # bench (TTFT/TPOT/tps), ~60 min wall
+bash scripts/submit_experiment.sh TPBOTH               # verify then bench (reuses decode), ~60 min wall
 ```
+
+`RUN_MODE` (set in each config) selects what the runner does after the decode loop. See `docs/INFERENCE.md` for the result-file table.
 
 `submit_experiment.sh <TAG>` is the single user command. It validates the config, writes the resolved env snapshot, writes the sbatch, calls `sbatch`, captures the job id, and writes run metadata under `results_clean/runs/<TAG>/<JOB_ID>/`. Do not call `sbatch` directly.
 

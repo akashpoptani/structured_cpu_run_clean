@@ -50,7 +50,10 @@ bash scripts/setup_venv.sh --reset
 |---|---|---|
 | `TPCHECKREAL_NOLOAD` | TP2 construct-only smoke | dist init + `Transformer(args)`; skip weight load and decode. ~few seconds wall. |
 | `TPCHECKREAL_NOGEN` | TP2 weight-load smoke | dist init + construct + load `model{rank}-mp2.safetensors`; skip decode. ~5–10 min wall. |
-| `TPCHECKREAL` | full TP2 token-exact verification | the full pipeline. Known-good against `case_0001`. ~60 min wall at `DEQUANT_FP8_WEIGHTS=none`. |
+| `TPCHECKREAL` | TP2 verify (token-exact) | full pipeline + compare against `expected_output_token_ids`. Known-good against `case_0001`. ~60 min wall at `DEQUANT_FP8_WEIGHTS=none`. |
+| `TPGEN` | TP2 generate | full pipeline; emits tokens + decoded text, no compare. ~60 min wall. |
+| `TPBENCH` | TP2 bench | full pipeline; emits TTFT / TPOT / tokens-per-second. ~60 min wall. |
+| `TPBOTH` | TP2 verify then bench | verify first; if every case passes, reuse decode timings to compute bench. ~60 min wall (one decode pass). |
 
 All three use: `SHARDING_MODE=tp2`, `TP_SIZE=2`, `WEIGHTS_PRECISION=fp8`, `DEQUANT_FP8_WEIGHTS=none`, `SHARDED_CKPT_PATH=/scratch/.../deepseek-v3.2-mp2-rerun`, `SBATCH_PARTITION=project_l`, `SBATCH_ACCOUNT=kdur`, 2 nodes × 16 cpus × 400 GB.
 
