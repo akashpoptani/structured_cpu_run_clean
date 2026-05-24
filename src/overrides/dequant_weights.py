@@ -94,7 +94,16 @@ def _dequantize_fp8_block(
             .reshape(s_out * block_size, s_in * block_size))
 
     if pad_out or pad_in:
-        return bf16[:out_features, :in_features].contiguous()
+        # NOTE: .contiguous() no-ops when the slice already has contiguous
+        # strides (e.g. wkv_a: out=576, in=7168 — `in` is block-aligned, so
+        # `bf16[:576, :7168]` is contiguous but is still a *view* of the
+        # larger (640, 7168) padded storage. Downstream tooling that scans
+        # `state_dict()` for shared storage (e.g. safetensors.save_file)
+        # then refuses to write because the smaller-tensor-as-view doesn't
+        # "cover" its full storage. `.clone()` forces a freshly-allocated
+        # tensor sized exactly to (out, in), avoiding the issue at the cost
+        # of one extra per-weight allocation that is freed immediately.
+        return bf16[:out_features, :in_features].clone()
     return bf16
 
 

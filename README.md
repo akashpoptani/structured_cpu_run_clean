@@ -51,9 +51,12 @@ bash scripts/setup_venv.sh --reset
 | `TPCHECKREAL_NOLOAD` | TP2 construct-only smoke | dist init + `Transformer(args)`; skip weight load and decode. ~few seconds wall. |
 | `TPCHECKREAL_NOGEN` | TP2 weight-load smoke | dist init + construct + load `model{rank}-mp2.safetensors`; skip decode. ~5–10 min wall. |
 | `TPCHECKREAL` | TP2 verify (token-exact) | full pipeline + compare against `expected_output_token_ids`. Known-good against `case_0001`. ~60 min wall at `DEQUANT_FP8_WEIGHTS=none`. |
-| `TPGEN` | TP2 generate | full pipeline; emits tokens + decoded text, no compare. ~60 min wall. |
-| `TPBENCH` | TP2 bench | full pipeline; emits TTFT / TPOT / tokens-per-second. ~60 min wall. |
-| `TPBOTH` | TP2 verify then bench | verify first; if every case passes, reuse decode timings to compute bench. ~60 min wall (one decode pass). |
+| `TPGEN_LIN10` / `TPBENCH_LIN10` / `TPBOTH_LIN10` | TP2 gen/bench/both at Lin=10/Lout=15, dequant=none | older runs using the reference prompt; kept for reference. |
+| `TPDEQUANTCACHE_PRIME` | TP2 dequant=all, write BF16 cache, no decode | one-shot cache writer; run once before parallel `read` jobs. |
+| `TPGEN` | TP2 generate at Lin=100/Lout=40, dequant=all + BF16 cache | synthetic exact-token prompt; reads cache when present. |
+| `TPBENCH` | TP2 bench at Lin=100/Lout=40, dequant=all + BF16 cache | synthetic exact-token prompt; emits TTFT/TPOT/tps. |
+| `TPBOTH` | TP2 verify (reference) then bench (synthetic), dequant=all + BF16 cache | two distinct decode passes; bench only runs if verify passes. |
+| `TPSESSION` | session: TPGEN → TPBENCH → TPBOTH | one allocation; one model load; results per child + session summary. |
 
 All three use: `SHARDING_MODE=tp2`, `TP_SIZE=2`, `WEIGHTS_PRECISION=fp8`, `DEQUANT_FP8_WEIGHTS=none`, `SHARDED_CKPT_PATH=/scratch/.../deepseek-v3.2-mp2-rerun`, `SBATCH_PARTITION=project_l`, `SBATCH_ACCOUNT=kdur`, 2 nodes × 16 cpus × 400 GB.
 
@@ -88,10 +91,10 @@ scripts/run_native_distributed.sh (per node):
   └─ exec python -m torch.distributed.run \
          --nnodes=N --nproc-per-node=1 --node-rank=$SLURM_NODEID \
          --master-addr=$MASTER_ADDR --master-port=$MASTER_PORT \
-         scripts/native_verify.py --resolved-config <…> --reference-group <…>
+         scripts/native_run.py --resolved-config <…> --reference-group <…>
              [--no-load-weights | --no-generate]
 
-scripts/native_verify.py (per rank):
+scripts/native_run.py (per rank):
   └─ parses resolved config + detects rank/world from env
   └─ enumerates reference cases in --reference-group (loops if --case-id omitted)
   └─ setup_thread_env: torch.set_num_threads / default dtype / manual_seed(0)
@@ -131,9 +134,9 @@ scripts/native_verify.py (per rank):
 
 Reference cases under `verification/references/<group>/<case>.json` are committed. `examples/generated/` contains a checked-in example resolved env + sbatch for documentation.
 
-## Important: do not run native_verify.py directly for TP2
+## Important: do not run native_run.py directly for TP2
 
-Calling `.venv/bin/python scripts/native_verify.py --resolved-config <TPCHECKREAL_resolved.env> --reference-group <…>` from a normal shell starts a **single-rank** process with `WORLD_SIZE=1`. The weight loader would then look for `model0-mp1.safetensors` (which does not exist for the TP2 shards) and the model would not be sharded across ranks. Always go through `submit_experiment.sh` for real TP2 runs. The construct-only `--no-load-weights` path is the only safe direct-Python invocation, and even then it only validates the build pipeline, not the distributed runtime.
+Calling `.venv/bin/python scripts/native_run.py --resolved-config <TPCHECKREAL_resolved.env> --reference-group <…>` from a normal shell starts a **single-rank** process with `WORLD_SIZE=1`. The weight loader would then look for `model0-mp1.safetensors` (which does not exist for the TP2 shards) and the model would not be sharded across ranks. Always go through `submit_experiment.sh` for real TP2 runs. The construct-only `--no-load-weights` path is the only safe direct-Python invocation, and even then it only validates the build pipeline, not the distributed runtime.
 
 ## Next work
 

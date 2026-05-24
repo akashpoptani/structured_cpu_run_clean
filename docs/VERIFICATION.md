@@ -86,7 +86,7 @@ python3 scripts/run_verify.py --resolved-config results_clean/resolved_configs/T
 
 ## Native TP2 verification (real distributed inference)
 
-`scripts/native_verify.py` is the first real native verification path. It:
+`scripts/native_run.py` is the first real native verification path. It:
 
 1. Parses the resolved env snapshot.
 2. Detects `WORLD_SIZE`/`RANK`/`MASTER_ADDR`/`MASTER_PORT` from the launcher.

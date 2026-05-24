@@ -16,10 +16,10 @@ The clean lane brings up native CPU DeepSeek-V3.2 inference in small, reviewable
 3. **Model construction smoke** — `scripts/model_construct_smoke.py`.
    First explicit `Transformer(ModelArgs(...))` instantiation. Reads the native DeepSeek ModelArgs JSON at `MODEL_ARGS_CONFIG_PATH` (default `../DeepSeek-V3.2/inference/config_671B_v3.2.json`), instantiates via `ModelArgs(**native_config)`, and applies explicit runtime overrides: `dtype` (from `WEIGHTS_PRECISION`), `max_batch_size` (CLI), `max_seq_len` (CLI). Does not load weights, does not call `forward`, does not call `torch.distributed`. Reports parameter count, parameter dtype counts, and whether buffers exist. Construction may still allocate full-model parameter shapes regardless of reduced batch/seq overrides.
 
-4. **Weight loading** — `scripts/native_verify.py --no-generate`.
+4. **Weight loading** — `scripts/native_run.py --no-generate`.
    First real safetensor weight load into a constructed `Transformer`. Reads the rank-aware per-shard file `model{rank}-mp{world_size}.safetensors` under `SHARDED_CKPT_PATH` via `safetensors.torch.load_model` with `strict=False`. Missing/unexpected keys are reported, not silenced. Optional `DEQUANT_FP8_WEIGHTS=all` pre-dequantizes every FP8 Linear to BF16 in place once at load (TP2 token-exact baseline). Must run inside a 2-node Slurm allocation for TP2.
 
-5. **Real token generation** — `scripts/native_verify.py` (no flag).
+5. **Real token generation** — `scripts/native_run.py` (no flag).
    First end-to-end greedy decode against a clean-lane reference case. Tokenizes the prompt (`add_special_tokens=False`), runs prefill + Lout single-token decode steps, argmax greedy, compares generated IDs to `expected_output_token_ids`. Rank 0 writes `results_clean/results/<TAG>/native_verify_results.json`. Targeted first config: TPCHECKREAL (prompt1, BS=1, Lin=10, Lout=15).
 
 ## Shared utilities
@@ -73,7 +73,7 @@ srun --nodes=$SBATCH_NODES --ntasks=$SBATCH_NODES --ntasks-per-node=$SBATCH_TASK
 
 then calls `sbatch` and records the job id. `REAL_RUN=1` is the baseline default; the placeholder dry-run path through `run_case.sh` is no longer reachable through the main launcher and remains only as earlier-bring-up debug code.
 
-`scripts/run_native_distributed.sh` exports OMP env, computes `MASTER_ADDR`/`MASTER_PORT` from `SLURM_JOB_NODELIST`/`SLURM_JOB_ID`, and calls `torch.distributed.run` with one rank per node, which invokes `scripts/native_verify.py`.
+`scripts/run_native_distributed.sh` exports OMP env, computes `MASTER_ADDR`/`MASTER_PORT` from `SLURM_JOB_NODELIST`/`SLURM_JOB_ID`, and calls `torch.distributed.run` with one rank per node, which invokes `scripts/native_run.py`.
 
 The current real-run targets are three TPCHECKREAL variants:
 
@@ -85,27 +85,47 @@ The current real-run targets are three TPCHECKREAL variants:
 
 ## RUN_MODE semantics
 
-`scripts/native_verify.py` now dispatches on the resolved-config `RUN_MODE`. Setup (dist init, Transformer construct, weight load, optional dequant, tokenizer) runs once; mode-specific post-processing follows the decode loop.
+`scripts/native_run.py` now dispatches on the resolved-config `RUN_MODE`. Setup (dist init, Transformer construct, weight load, optional dequant, tokenizer) runs once; mode-specific post-processing follows the decode loop.
 
 | RUN_MODE | Behavior | Result file under `results_clean/results/<TAG>/` | Exit |
 |---|---|---|---|
-| `verify` | greedy decode + compare against `expected_output_token_ids` | `native_verify_results.json` | 0 iff every case passes |
-| `generate` | greedy decode, no compare; emits tokens and decoded text (reference expected tokens, if present in the case JSON, are carried through as diagnostics) | `native_generate_results.json` | 0 on completion |
-| `bench` | greedy decode + per-case TTFT / TPOT / tokens-per-second + group aggregate | `native_bench_results.json` | 0 on completion |
-| `both` | verify first; if any case fails, write verify JSON and exit 1; if every case passes, reuse the same decode timings to write bench JSON and a `native_both_results.json` summary that points to both | `native_verify_results.json` + `native_bench_results.json` + `native_both_results.json` | 0 iff verify passes |
+| `verify` | greedy decode + compare against `expected_output_token_ids` from reference JSON cases | `native_verify_results.json` | 0 iff every case passes |
+| `generate` | greedy decode of synthetic exact-token prompts built from `LIN_TOKENS`/`LOUT_TOKENS`/`BATCH_SIZE`, no compare | `native_generate_results.json` | 0 on completion |
+| `bench` | greedy decode of synthetic exact-token prompts + per-case TTFT / TPOT / tokens-per-second + group aggregate | `native_bench_results.json` | 0 on completion |
+| `both` | **two distinct decode passes**: verify on reference cases first; if any case fails, write verify JSON and exit 1; if every case passes, then run a second pass on synthetic prompts and write the bench JSON + `native_both_results.json` summary | `native_verify_results.json` + `native_bench_results.json` + `native_both_results.json` | 0 iff verify passes |
 
-`bench` and `both` reuse the timings collected during decode (single decode pass per case). TTFT is `prefill_seconds` (first output token is emitted at the end of prefill); TPOT is `decode_seconds_total / (lout - 1)`; `tokens_per_second = lout / total_seconds`.
+Synthetic prompts come from `src/clean_inference/prompting.py:build_exact_prompt`, which decodes/re-encodes candidate prefixes of a repeating seed text until `tokenizer.encode(prompt, add_special_tokens=False)` is exactly `LIN_TOKENS` long. The default seed is the fox sentence; `SEEDS` carries a list cycled for `BATCH_SIZE>1` (not yet exercised).
 
-`NATIVE_NO_LOAD_WEIGHTS=1` and `NATIVE_NO_GENERATE=1` are honored under every RUN_MODE; the result file name follows the table above but the body records what was skipped (`status: construct_only` or `status: weights_loaded_no_generation`).
+TTFT = `prefill_seconds`; TPOT = `decode_seconds_total / (lout - 1)`; `tokens_per_second = lout / total_seconds`.
 
-### Run-mode configs (TP2, fp8, DEQUANT_FP8_WEIGHTS=none, c16/500G/ramanvr)
+`NATIVE_NO_LOAD_WEIGHTS=1` and `NATIVE_NO_GENERATE=1` are honored under every RUN_MODE; the result file name follows the table above but the body records what was skipped.
 
-| Tag | RUN_MODE |
-|---|---|
-| `TPCHECKREAL` | `verify` (known-good token-exact) |
-| `TPGEN` | `generate` |
-| `TPBENCH` | `bench` |
-| `TPBOTH` | `both` |
+### Dequant-all BF16 cache
+
+`DEQUANT_CACHE_MODE` + `DEQUANT_CACHE_PATH` persist the per-rank dequantized BF16 weights to scratch so a later run can skip the ~51 min dequant pass. Modes:
+
+- `off` (default): no cache action.
+- `write`: load FP8, run dequant scope=all, then write `model{rank}-mp{world_size}-bf16-dequant-all.safetensors` plus a `*.metadata.json` sibling. Skips write if the file already exists (never overwrites silently).
+- `read`: load the BF16 cache shard directly; fail if missing. Model construction overrides `ModelArgs.dtype` to `bf16` (and clears `scale_fmt`) so Linear params are BF16 to start with.
+- `read_or_write`: read if the cache exists, otherwise fall back to FP8+dequant+write.
+
+Concurrency note: if multiple jobs are submitted in parallel against a cold cache, both may try to write. `TPDEQUANTCACHE_PRIME` is a one-shot `NATIVE_NO_GENERATE=1` config that primes the cache before the parallel `read` jobs.
+
+### Run-mode configs
+
+| Tag | RUN_MODE | Prompt source | Dequant | Notes |
+|---|---|---|---|---|
+| `TPCHECKREAL` | verify | reference (Lin=10/Lout=15) | none | known-good token-exact baseline |
+| `TPGEN_LIN10` / `TPBENCH_LIN10` / `TPBOTH_LIN10` | generate / bench / both | reference (Lin=10/Lout=15) | none | older Lin=10/Lout=15 runs (kept for reference) |
+| `TPDEQUANTCACHE_PRIME` | verify (+ `NATIVE_NO_GENERATE=1`) | n/a | all, cache=write | one-shot cache writer |
+| `TPGEN` | generate | synthetic (Lin=100/Lout=40) | all, cache=read_or_write | |
+| `TPBENCH` | bench | synthetic (Lin=100/Lout=40) | all, cache=read_or_write | |
+| `TPBOTH` | both | reference for verify + synthetic for bench (Lin=100/Lout=40) | all, cache=read_or_write | two decode passes |
+| `TPSESSION` | n/a | per-child | all, cache=read_or_write | session runs TPGEN→TPBENCH→TPBOTH in one allocation |
+
+## Session mode
+
+`scripts/submit_session.sh <SESSION_TAG>` reads `scripts/session_configs/<TAG>.env`, validates every child tag listed in `SESSION_CHILDREN` shares (SHARDING_MODE, TP/DP/EP/PP, WEIGHTS_PRECISION, SHARDED_CKPT_PATH, MODEL_ARGS_CONFIG_PATH, DEQUANT_FP8_WEIGHTS), then submits one sbatch that runs `scripts/native_session.py` via torch.distributed.run. The session loads the model once (with optional cache write/read), holds it in memory, and dispatches each child's RUN_MODE phase sequentially. Per-child result JSONs go to `results_clean/results/<child_tag>/`; the session summary is at `results_clean/results/<SESSION_TAG>/session_results.json`.
 
 ## What preflight does not cover
 

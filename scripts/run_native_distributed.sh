@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Launch native_verify.py via torch.distributed.run inside a Slurm allocation.
+# Launch native_run.py via torch.distributed.run inside a Slurm allocation.
 #
 # Mirrors the legacy ../structured_cpu_run/verification/run_milestone_bench.sbatch
 # launch shape:
@@ -8,7 +8,7 @@
 #         --nnodes=N --nproc-per-node=1
 #         --node-rank=$SLURM_NODEID
 #         --master-addr=$MASTER_ADDR --master-port=$MASTER_PORT
-#         scripts/native_verify.py --resolved-config ... --reference-group ... --case-id ...
+#         scripts/native_run.py --resolved-config ... --reference-group ... --case-id ...
 #
 # This script:
 #   1. Sources the resolved env snapshot.
@@ -151,7 +151,7 @@ exec "$PYTHON_BIN" -m torch.distributed.run \
     --node-rank="$NODE_RANK" \
     --master-addr="$MASTER_ADDR" \
     --master-port="$MASTER_PORT" \
-    "$CLEAN_ROOT/scripts/native_verify.py" \
+    "$CLEAN_ROOT/scripts/native_run.py" \
     --resolved-config "$RESOLVED_CONFIG_PATH" \
     --reference-group "$REFERENCE_GROUP" \
     "${CASE_FLAG[@]}" \

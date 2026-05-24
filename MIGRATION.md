@@ -25,7 +25,7 @@ Completed:
 - Tokenizer loading: `src/clean_inference/tokenization.py` (`PreTrainedTokenizerFast` from `tokenizer.json`, special-token kwargs from `tokenizer_config.json`, `add_special_tokens=False`).
 - Greedy decode loop: `src/clean_inference/generation.py` (prefill + per-token decode, `logits.argmax(-1)`).
 - Clean re-write of `dequant_weights.py` into `src/overrides/dequant_weights.py` (block-broadcast FP8 → BF16, no `repeat_interleave` grid).
-- `scripts/native_verify.py` (full pipeline with `--no-load-weights` and `--no-generate` safety flags).
+- `scripts/native_run.py` (full pipeline with `--no-load-weights` and `--no-generate` safety flags).
 - `scripts/run_native_distributed.sh` (torchrun launcher mirroring the legacy srun shape).
 - `REAL_RUN` gate in `_baseline.env` / `parse_config.sh` / `submit_experiment.sh`. `REAL_RUN=1` generates a real-distributed sbatch that calls `run_native_distributed.sh`; `REAL_RUN=0` keeps the dry-run placeholder.
 - `SHARDED_CKPT_PATH` plumbed through (per-rank TP shard directory; empty in baseline, set in TPCHECKREAL).

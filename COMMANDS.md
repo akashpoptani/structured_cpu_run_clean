@@ -8,12 +8,28 @@ See [README.md](README.md) for the full flow. This file is the terse command ind
 bash scripts/submit_experiment.sh TPCHECKREAL_NOLOAD   # construct only, ~few seconds wall
 bash scripts/submit_experiment.sh TPCHECKREAL_NOGEN    # weight-load only, ~5-10 min wall
 bash scripts/submit_experiment.sh TPCHECKREAL          # full token-exact decode (verify), ~60 min wall
-bash scripts/submit_experiment.sh TPGEN                # generate only (no compare), ~60 min wall
-bash scripts/submit_experiment.sh TPBENCH              # bench (TTFT/TPOT/tps), ~60 min wall
-bash scripts/submit_experiment.sh TPBOTH               # verify then bench (reuses decode), ~60 min wall
+
+# Lin=10/Lout=15, dequant=none (legacy known-good; kept as LIN10-prefixed):
+bash scripts/submit_experiment.sh TPGEN_LIN10
+bash scripts/submit_experiment.sh TPBENCH_LIN10
+bash scripts/submit_experiment.sh TPBOTH_LIN10
+
+# Lin=100/Lout=40, dequant=all, synthetic exact-token prompts, BF16 cache:
+bash scripts/submit_experiment.sh TPDEQUANTCACHE_PRIME   # one-shot cache writer (NOGEN). Run FIRST to avoid concurrent write race.
+bash scripts/submit_experiment.sh TPGEN                  # generate synthetic prompt; reads cache
+bash scripts/submit_experiment.sh TPBENCH                # bench synthetic prompt; reads cache
+bash scripts/submit_experiment.sh TPBOTH                 # verify on reference + bench synthetic; reads cache
 ```
 
-`RUN_MODE` (set in each config) selects what the runner does after the decode loop. See `docs/INFERENCE.md` for the result-file table.
+`RUN_MODE` (set in each config) selects what the runner does after the decode loop. `verify` uses committed reference cases; `generate`/`bench` use synthetic exact-token prompts built from `LIN_TOKENS`/`LOUT_TOKENS`; `both` runs verify-on-reference first, then bench-on-synthetic. See `docs/INFERENCE.md` for the result-file table.
+
+## Session mode (one allocation, multiple modes)
+
+```bash
+bash scripts/submit_session.sh TPSESSION
+```
+
+Reads `scripts/session_configs/TPSESSION.env`, validates all listed children share TP/precision/shards/etc., generates one sbatch, and launches `scripts/native_session.py` which constructs+loads the model once and runs every child's RUN_MODE phase sequentially. Per-child result JSONs land under `results_clean/results/<child_tag>/`; a session summary lands at `results_clean/results/<SESSION_TAG>/session_results.json`.
 
 `submit_experiment.sh <TAG>` is the single user command. It validates the config, writes the resolved env snapshot, writes the sbatch, calls `sbatch`, captures the job id, and writes run metadata under `results_clean/runs/<TAG>/<JOB_ID>/`. Do not call `sbatch` directly.
 
@@ -121,7 +137,7 @@ No `sbatch` is submitted automatically — Akash submits each stage manually. TP
 
 ### Stage 1 — Safe construct-only local check (no Slurm, no weights)
 ```bash
-.venv/bin/python scripts/native_verify.py \
+.venv/bin/python scripts/native_run.py \
     --resolved-config results_clean/resolved_configs/TPCHECKREAL_resolved.env \
     --reference-group prompt1_bs1_lin10_lout15 \
     --no-load-weights
@@ -134,7 +150,7 @@ Edit `scripts/configs/TPCHECKREAL_*.env`, set `NATIVE_NO_GENERATE=1`, then:
 bash scripts/submit_experiment.sh TPCHECKREAL          # regenerates resolved_config + sbatch
 sbatch tmp/sbatch/TPCHECKREAL_*.sbatch                 # Akash submits
 ```
-`run_native_distributed.sh` reads `NATIVE_NO_GENERATE=1` from the resolved env and passes `--no-generate` to `native_verify.py`. Validates rank-aware shard loading + optional pre-dequant. Reset to `0` for Stage 3.
+`run_native_distributed.sh` reads `NATIVE_NO_GENERATE=1` from the resolved env and passes `--no-generate` to `native_run.py`. Validates rank-aware shard loading + optional pre-dequant. Reset to `0` for Stage 3.
 
 ### Stage 3 — Full decode (defaults)
 With `NATIVE_NO_LOAD_WEIGHTS=0` and `NATIVE_NO_GENERATE=0`:
@@ -153,7 +169,7 @@ Which invokes:
 ```bash
 python -m torch.distributed.run --nnodes=$SBATCH_NODES --nproc-per-node=1 \
     --node-rank=$SLURM_NODEID --master-addr=$MASTER_ADDR --master-port=$MASTER_PORT \
-    scripts/native_verify.py --resolved-config <...> --reference-group prompt1_bs1_lin10_lout15
+    scripts/native_run.py --resolved-config <...> --reference-group prompt1_bs1_lin10_lout15
 ```
 `--case-id` is omitted by default so every case in the group is run sequentially against the constructed/loaded model. Set `NATIVE_CASE_ID=case_0001` (env var to the launcher) to restrict to one case.
 

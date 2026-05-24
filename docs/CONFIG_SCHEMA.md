@@ -123,6 +123,8 @@ Pipeline parallelism is schema-visible but out of scope.
 
 `DEQUANT_FP8_WEIGHTS` controls optional pre-dequantization of FP8 weights to BF16 in place once at load. Supported values are `all` (matches the legacy TP2 token-exact convention) and `none` (keeps FP8; the per-call FP32 fallback in `src/overrides/kernel.py` runs instead). The legacy `dense` scope is intentionally not exposed in the clean lane until DP2 EP-off support lands.
 
+`DEQUANT_CACHE_MODE` (`off` | `write` | `read` | `read_or_write`) and `DEQUANT_CACHE_PATH` control optional persistence of the per-rank dequant=all BF16 weights to scratch, so subsequent runs can skip the ~51 min dequant pass. Files: `model{rank}-mp{world_size}-bf16-dequant-all.safetensors` and a `*.metadata.json` sibling under `DEQUANT_CACHE_PATH`. `read` and `read_or_write` (cache-hit) cause `ModelArgs.dtype` to be overridden to `bf16` before construction so Linear layers do not allocate FP8 parameters.
+
 ## 12. Native ModelArgs config
 
 `MODEL_ARGS_CONFIG_PATH` points at the native DeepSeek ModelArgs JSON consumed directly by `../DeepSeek-V3.2/inference/model.py`. Default: `../DeepSeek-V3.2/inference/config_671B_v3.2.json`.
