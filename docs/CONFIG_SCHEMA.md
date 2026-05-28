@@ -123,7 +123,14 @@ Pipeline parallelism is schema-visible but out of scope.
 
 `DEQUANT_FP8_WEIGHTS` controls optional pre-dequantization of FP8 weights to BF16 in place once at load. Supported values are `all` (matches the legacy TP2 token-exact convention) and `none` (keeps FP8; the per-call FP32 fallback in `src/overrides/kernel.py` runs instead). The legacy `dense` scope is intentionally not exposed in the clean lane until DP2 EP-off support lands.
 
-`DEQUANT_CACHE_MODE` (`off` | `write` | `read` | `read_or_write`) and `DEQUANT_CACHE_PATH` control optional persistence of the per-rank dequant=all BF16 weights to scratch, so subsequent runs can skip the ~51 min dequant pass. Files: `model{rank}-mp{world_size}-bf16-dequant-all.safetensors` and a `*.metadata.json` sibling under `DEQUANT_CACHE_PATH`. `read` and `read_or_write` (cache-hit) cause `ModelArgs.dtype` to be overridden to `bf16` before construction so Linear layers do not allocate FP8 parameters.
+`DEQUANT_CACHE_MODE` (`off` | `write` | `read` | `read_or_write`) and `DEQUANT_CACHE_PATH` control optional persistence of the per-rank dequant=all BF16 weights to scratch, so subsequent runs can skip the ~51 min dequant pass. The cache layout is **sharded**: a per-rank `model{rank}-mp{world_size}-bf16-dequant-all.index.json` (canonical existence marker, written last) + N `…-{NNNNN}.safetensors` files (~20 GiB each) + a `…-bf16-dequant-all.metadata.json` sibling. `read` and `read_or_write` (cache-hit) cause `ModelArgs.dtype` to be overridden to `bf16` before construction so Linear layers do not allocate FP8 parameters.
+
+Cache compatibility is checked on read against **model identity + TP topology only**:
+
+- Hard-fail: `rank`, `world_size`, `dtype` (`bf16`), `dequant_scope` (`all`), `sharding_mode`.
+- Warn: `source_sharded_ckpt_path`, `model_args_config_path` (symlinks may produce harmless path mismatches).
+
+**`SBATCH_CPUS_PER_TASK`, `OMP_NUM_THREADS`, partition, account, node names, and SLURM job id are intentionally NOT part of cache compatibility.** The same TP2 cache is readable under `c=1` or `c=96`; only performance changes. If `TP_SIZE` / `world_size` changes, use a different `DEQUANT_CACHE_PATH` — the shards are world-size-specific by construction. Memory must remain high (≥800 GB / rank) regardless of cores, because the BF16 cached state is ~676 GB / rank.
 
 ## 12. Native ModelArgs config
 

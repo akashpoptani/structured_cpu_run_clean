@@ -23,6 +23,19 @@ bash scripts/submit_experiment.sh TPBOTH                 # verify on reference +
 
 `RUN_MODE` (set in each config) selects what the runner does after the decode loop. `verify` uses committed reference cases; `generate`/`bench` use synthetic exact-token prompts built from `LIN_TOKENS`/`LOUT_TOKENS`; `both` runs verify-on-reference first, then bench-on-synthetic. See `docs/INFERENCE.md` for the result-file table.
 
+## Quick-iteration small configs (Lin=16/Lout=9; reads existing cache)
+
+```bash
+bash scripts/submit_experiment.sh TPCACHE_SMALLGEN   # c=1 / OMP=1 — proves cache is core-count-independent
+bash scripts/submit_experiment.sh TPSMALLGEN         # c=16
+bash scripts/submit_experiment.sh TPSMALLBENCH       # c=16
+bash scripts/submit_experiment.sh TPSMALLBOTH        # c=16
+```
+
+The cache lives at `DEQUANT_CACHE_PATH=…/deepseek-v3.2-tp2-bf16-dequant-all` and is **independent of CPU cores / OMP threads**. The same TP2 cache is readable under `c=1`, `c=16`, `c=72`, etc.; only performance changes. Memory must stay high (≥800 GB) because the BF16 cached shards are ~676 GB per rank regardless of cores.
+
+If `TP_SIZE` / `world_size` changes, use a different `DEQUANT_CACHE_PATH` and regenerate — shards are world-size-specific.
+
 ## Session mode (one allocation, multiple modes)
 
 ```bash

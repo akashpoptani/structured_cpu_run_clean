@@ -559,7 +559,7 @@ def run(
     cache_write_report: Optional[Dict[str, Any]] = None
 
     if cache_plan["do_read_cache"]:
-        cache_read_report = load_cached_bf16_weights(transformer, cache_plan, dist_env, log_fn=log)
+        cache_read_report = load_cached_bf16_weights(transformer, cache_plan, dist_env, config, log_fn=log)
     else:
         load_report = load_weights_into_transformer(transformer, config, dist_env, log_fn=log)
         dequant_report = maybe_dequantize_fp8(transformer, config, log_fn=log)

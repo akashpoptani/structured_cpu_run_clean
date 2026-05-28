@@ -148,7 +148,7 @@ def main() -> int:
     dequant_report = None
     cache_write_report = None
     if cache_plan["do_read_cache"]:
-        cache_read_report = load_cached_bf16_weights(transformer, cache_plan, dist_env, log_fn=log)
+        cache_read_report = load_cached_bf16_weights(transformer, cache_plan, dist_env, base_config, log_fn=log)
     else:
         load_report = load_weights_into_transformer(transformer, base_config, dist_env, log_fn=log)
         dequant_report = maybe_dequantize_fp8(transformer, base_config, log_fn=log)

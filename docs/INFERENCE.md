@@ -100,6 +100,21 @@ TTFT = `prefill_seconds`; TPOT = `decode_seconds_total / (lout - 1)`; `tokens_pe
 
 `NATIVE_NO_LOAD_WEIGHTS=1` and `NATIVE_NO_GENERATE=1` are honored under every RUN_MODE; the result file name follows the table above but the body records what was skipped.
 
+### Cache compatibility rules
+
+The BF16 dequant cache is tied to **model identity + TP topology**, not to per-node CPU resources. Compat fields validated on read:
+
+- **Hard fail** if the cache's claimed `rank`, `world_size`, `dtype` (must be `bf16`), `dequant_scope` (must be `all`), or `sharding_mode` disagree with the running config.
+- **Warn** if `source_sharded_ckpt_path` or `model_args_config_path` differ (symlinks can produce harmless path mismatches; topology fields above still gate hard).
+
+Intentionally **not** part of compatibility:
+
+- `SBATCH_CPUS_PER_TASK`, `OMP_NUM_THREADS`, thread binding, partition, account, node names, SLURM job id.
+
+The same TP2 BF16 cache is readable under `OMP_NUM_THREADS=1` or `=96`; only performance changes. If `TP_SIZE` / `world_size` changes, point `DEQUANT_CACHE_PATH` at a different directory and regenerate — the per-shard slices are world-size-specific by construction.
+
+Memory requirement is independent of cores: the BF16 cached TP2 shards add up to ~676 GB per rank, so `SBATCH_MEM` should stay high (≥800 GB / rank) regardless of how few CPUs you ask for.
+
 ### Dequant-all BF16 cache
 
 `DEQUANT_CACHE_MODE` + `DEQUANT_CACHE_PATH` persist the per-rank dequantized BF16 weights to scratch so a later run can skip the ~51 min dequant pass. Modes:
@@ -122,6 +137,8 @@ Concurrency note: if multiple jobs are submitted in parallel against a cold cach
 | `TPBENCH` | bench | synthetic (Lin=100/Lout=40) | all, cache=read_or_write | |
 | `TPBOTH` | both | reference for verify + synthetic for bench (Lin=100/Lout=40) | all, cache=read_or_write | two decode passes |
 | `TPSESSION` | n/a | per-child | all, cache=read_or_write | session runs TPGEN→TPBENCH→TPBOTH in one allocation |
+| `TPCACHE_SMALLGEN` | generate | synthetic (Lin=16/Lout=9) | all, cache=read | smoke test: same TP2 cache loads under `OMP_NUM_THREADS=1` (proves cache is core-count-independent) |
+| `TPSMALLGEN` / `TPSMALLBENCH` / `TPSMALLBOTH` | generate / bench / both | reference (verify) + synthetic Lin=16/Lout=9 | all, cache=read, c=16/800G | fast-iteration variants of TPGEN/TPBENCH/TPBOTH |
 
 ## Session mode
 
