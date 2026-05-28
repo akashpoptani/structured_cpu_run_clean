@@ -115,8 +115,46 @@ It does, however, call `dist.broadcast`, which **requires
      `dist.is_initialized() == plan.needs_dist` so a mode/plan mismatch fails
      loudly instead of silently skipping a needed collective.
 
+## ShardingPlan API (Stage 1 — implemented)
+
+`src/overrides/sharding_plan.py` (no torch import; data + policy only):
+
+```python
+ShardingPlan(mode, rank, world_size, indexer_cross_rank_check=None)
+  mode:                          "tp2" | "dp2" | "dp2_epon"
+  .experts_partitioned   -> bool # True: tp2, dp2_epon
+  .heads_partitioned     -> bool # True: tp2
+  .embedding_partitioned -> bool # True: tp2
+  .dense_replicated      -> bool # True: dp2, dp2_epon
+  .needs_dist            -> bool # True: tp2, dp2_epon
+  .indexer_cross_rank_check -> bool  # default True: tp2; False: dp2, dp2_epon
+                                     # (constructor arg None -> per-mode default;
+                                     #  pass an explicit bool to override)
+  .expert_range(n_routed_experts) -> (start, end)  # half-open
+        # partitioned (tp2, dp2_epon): contiguous block per rank,
+        #   requires n % world_size == 0
+        # non-partitioned (dp2): (0, n) on every rank
+```
+
+Module-level active-plan helpers (set once per process, before construction):
+
+```python
+set_plan(plan)     # install the process-wide ShardingPlan
+get_plan()         # return it; RuntimeError if none set
+clear_plan()       # drop it (tests)
+```
+
+Validation enforced in `__post_init__`: mode in the supported set; rank/world
+ints; world_size >= 1; rank >= 0; rank < world_size; dp2 world_size in {1, 2}
+(expected 2); dp2_epon world_size >= 2; tp2 world_size >= 1.
+
+Two import paths resolve to the same file: `from src.overrides.sharding_plan
+import ShardingPlan` (namespace package, tests from repo root) and
+`from sharding_plan import get_plan` (flat module, once `src/overrides/` is on
+`sys.path` — how the future `model.py` override will read it).
+
 ## Status
 
-Design/inspection only. No runtime code, checkpoint-prep, or configs added in
-this step. The `ShardingPlan` dataclass and `src/overrides/model.py` override
-are the next stages.
+Stage 1 done: `ShardingPlan` + active-plan helpers, validated by the smoke
+command above. No runtime model override, checkpoint-prep, configs, or
+`native_run.py` changes yet — those are later stages.
