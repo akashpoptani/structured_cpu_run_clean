@@ -292,6 +292,34 @@ def resolve_cache_plan(
                                    modelargs builder must apply this before
                                    construction so Linear layers are BF16.
     """
+    # External BF16 checkpoint (e.g. produced offline by scripts/convert_to_bf16.py).
+    # Takes precedence over DEQUANT_CACHE_MODE: the weights are already BF16, so
+    # there is no FP8 load, no dequant pass, and nothing to write.
+    bf16_index_raw = (config.get("BF16_CKPT_INDEX") or "").strip()
+    if bf16_index_raw:
+        rank = int(dist_env["rank"])
+        index_path = Path(bf16_index_raw.replace("{RANK}", str(rank)))
+        if not index_path.is_absolute():
+            index_path = Path(config["CLEAN_ROOT"]).resolve() / index_path
+        index_path = index_path.resolve()
+        if not index_path.is_file():
+            _fail(f"BF16_CKPT_INDEX does not exist for rank {rank}: {index_path}")
+        log_fn(f"[bf16-ckpt] external BF16 checkpoint index: {index_path}")
+        return {
+            "mode": "external_bf16_index",
+            "cache_dir": index_path.parent,
+            "cache_file": index_path,
+            "cache_index_file": index_path,
+            "cache_legacy_file": None,
+            "cache_metadata_file": None,
+            "cache_layout": "external_index",
+            "cache_exists": True,
+            "do_read_cache": True,
+            "do_fp8_load_then_dequant": False,
+            "do_write_cache": False,
+            "override_modelargs_dtype": "bf16",
+        }
+
     mode = (config.get("DEQUANT_CACHE_MODE") or "off").strip().lower()
     path_raw = (config.get("DEQUANT_CACHE_PATH") or "").strip()
     dequant_scope = (config.get("DEQUANT_FP8_WEIGHTS") or "none").strip().lower()
@@ -542,10 +570,13 @@ def load_cached_bf16_weights(
     world_size = int(dist_env["world_size"])
     cache_dir: Path = plan["cache_dir"]
 
-    if layout == "sharded":
+    if layout in ("sharded", "external_index"):
+        # An external checkpoint carries no dequant-cache metadata, so the
+        # topology/identity validation is skipped for it.
         return _load_sharded_cache(
             transformer, cache_dir, plan["cache_index_file"], rank, world_size,
             config, dist_env, log_fn,
+            validate_metadata=(layout == "sharded"),
         )
     if layout == "legacy_monolithic":
         return _load_legacy_monolithic_cache(
@@ -620,6 +651,7 @@ def _load_sharded_cache(
     config: Dict[str, str],
     dist_env: Dict[str, Any],
     log_fn,
+    validate_metadata: bool = True,
 ) -> Dict[str, Any]:
     log_fn(f"[cache] reading sharded BF16 cache: {index_path}")
     try:
@@ -628,8 +660,11 @@ def _load_sharded_cache(
         _fail(f"[cache] could not read index {index_path}: {exc!r}")
 
     # Validate topology / model identity BEFORE touching any shards.
-    sibling = _read_sibling_metadata(cache_dir, rank, world_size)
-    _validate_cache_compat(index_path, index.get("metadata", {}), sibling, config, dist_env, log_fn)
+    if validate_metadata:
+        sibling = _read_sibling_metadata(cache_dir, rank, world_size)
+        _validate_cache_compat(index_path, index.get("metadata", {}), sibling, config, dist_env, log_fn)
+    else:
+        log_fn("[cache] external checkpoint: skipping dequant-cache metadata validation")
 
     weight_map: Dict[str, str] = index.get("weight_map", {})
     if not weight_map:
