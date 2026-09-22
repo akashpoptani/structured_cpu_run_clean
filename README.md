@@ -2,6 +2,87 @@
 
 A clean, supervised re-implementation of CPU DeepSeek-V3.2 inference. The clean lane drives upstream `../DeepSeek-V3.2/inference/model.py` through clean-owned overrides and a small runtime, with no Python imported at runtime from the legacy `../structured_cpu_run/` lane.
 
+## Resource-check-first
+
+**Never copy resources from a previous config. Check what is actually free, then size the job.**
+Before every submit, compute free capacity per node (`CfgTRES` minus `AllocTRES`) and pick the
+partition, memory, and node count from what is idle right now:
+
+```bash
+for p in project_l ramanvr; do echo "=== $p ==="
+  for node in $(sinfo -p $p -N -h -o "%N" | sort -u); do
+    scontrol show node $node | grep -E "CfgTRES|AllocTRES" | tr '\n' ' '; echo " <- $node"
+  done
+done
+```
+
+Sizing facts to check against (measured, not estimated):
+
+| Quantity | Value |
+|---|---|
+| BF16 weight shard, per rank (`DEQUANT_FP8_WEIGHTS=all`) | **628.4 GiB** |
+| FP8 weight shard, per rank (`DEQUANT_FP8_WEIGHTS=none`) | **314.8 GiB** |
+| TP2K measured job MaxRSS (Lin=2048/Lout=2048, 700G) | **641.7 GiB** |
+| KV cache | 78.3 KB per token (all 61 layers) |
+| Prefill attention peak | `2 x seqlen^2 x n_local_heads x 2 B` (the score matrix exists twice) |
+
+`SBATCH_MEM` is in GiB. **600G will OOM on the BF16 path** — it is 28 GiB below the weights alone.
+Both partitions have `MaxTime=14-00:00:00`, so over-request walltime rather than risk a mid-run kill.
+
+## Measured performance (2026-09-15)
+
+All numbers TP2, 2 nodes x 1 rank, BF16 weights from the dequant cache, Xeon Platinum 8468
+(2 sockets x 48 cores, 2 NUMA nodes x ~503 GiB).
+
+### Thread placement — the single largest win found so far
+
+`OMP_PROC_BIND=close` + `OMP_PLACES=cores` (the old launcher default) costs **5.5x on decode**
+and **3.4x on prefill**. Measured at Lin=128/Lout=20, 8 threads, everything else identical:
+
+| `PROC_BIND` | `PLACES` | prefill (ms) | s/token |
+|---|---|---|---|
+| `false` | *(ignored)* | **22,696** | **1.245** |
+| `spread` | `sockets` | 25,885 | 1.300 |
+| `close` | `cores` | 77,168 | 6.880 |
+| `spread` | `cores` | 72,184 | 7.239 |
+
+Pinning threads to *individual cores* is the problem, not the bind policy — `spread`+`sockets`
+behaves like `false`. **`scripts/run_native_distributed.sh` still defaults to `close`/`cores`;
+set `OMP_PROC_BIND="false"` in every config until that default is changed.**
+
+### Thread count (with `OMP_PROC_BIND=false`)
+
+| threads | prefill (ms) | s/token |
+|---|---|---|
+| 8 | 22,696 | 1.245 |
+| 16 | 28,354 | 0.965 |
+| **32** | **25,755** | **0.866** |
+| 48 | 24,867 | 0.975 |
+| 96 | 216,387 | 3.755 |
+
+**32 threads is the optimum**; 96 is 4.3x worse on decode and 8.4x worse on prefill (threads span
+both sockets, so cross-UPI traffic and barrier cost dominate). Slurm packs <=48 CPUs onto one
+socket. This independently matches the FlashMLA_CPU sparse-kernel finding (32 cores best at B=1).
+
+### End-to-end at Lin=2048 (32 threads, `bind=false`, 700G)
+
+| | TP2K (Lout=2048) | TP2KPLUS (Lout=2049) |
+|---|---|---|
+| BF16 cache load | 825.7 s | 817.7 s |
+| **TTFT** | **163.8 s** | 163.1 s |
+| **TPOT** | **0.973 s/token** | 0.978 s/token |
+| tokens/s | 0.950 | 0.946 |
+
+For reference the same shape under the bad binding at 8 threads was TTFT 676 s / TPOT 6.81 s.
+
+### 4096 boundary: no observable effect
+
+`max_seq_len` 4096 (TP2K) vs 4097 (TP2KPLUS) switches on the YaRN RoPE correction
+(`model.py:394`) and the mscale softmax adjustment (`model.py:535`). **All 2048 shared output
+tokens were identical.** Caveat: the synthetic prompt is a repeated pangram and the output is
+degenerate/repetitive, so this is weak evidence. Re-test with a real prompt before concluding
+the long-context numerics path is safe.
+
 ## Current milestone
 
 First real native TP2 token-exact verification PASSED. The `TPCHECKREAL` config (2 nodes × 16 cores × 400 GB, fp8 weights, `DEQUANT_FP8_WEIGHTS=none`) ran greedy decode for the committed reference prompt and produced the expected 15/15 output token IDs against `verification/references/prompt1_bs1_lin10_lout15/case_0001.json`. The `DEQUANT_FP8_WEIGHTS=none` per-call FP32 fallback is correctness-proven but ~10× slower than the legacy `=all` BF16 pre-dequant fast path.
@@ -36,6 +117,100 @@ bash scripts/setup_venv.sh --reset
 - `--reset` first deletes any existing `.venv` and rebuilds it. Use it when you want a known-clean environment or after `requirements.txt` changed.
 - Without `--reset`, the script refuses to overwrite an existing `.venv` and prints how to clean up.
 - If Lmod is unavailable: `PYTHON_BIN=/path/to/python3.12 bash scripts/setup_venv.sh --reset`.
+
+## Generating the TP2 weights
+
+`SHARDED_CKPT_PATH` is produced **once, offline**, before any experiment runs. Nothing at runtime
+shards or dequantizes; every job just reads these files.
+
+```bash
+.venv/bin/python scripts/convert_checkpoint.py \
+    --hf-ckpt-path /scratch/.../models/deepseek-v3.2 \
+    --save-path    /scratch/.../artifacts/deepseek-v3.2-mp2-rerun \
+    --n-experts 256 --model-parallel 2
+```
+
+Needs ~900 GB RAM and ~24 h on 48 cores (1 node, no distribution). Output is
+`model0-mp2.safetensors` + `model1-mp2.safetensors`, **338.0 GB each, still FP8** — conversion is
+purely structural (rename + slice + expert filter); dtype is never touched. Copy
+`config.json`, `generation_config.json`, `tokenizer.json`, `tokenizer_config.json` in alongside
+them, since the tokenizer is loaded from this directory.
+
+Three things it does per tensor:
+
+| Step | Detail |
+|---|---|
+| Rename | HF -> native: `self_attn`->`attn`, `mlp`->`ffn`, `weight_scale_inv`->`scale`, plus the `MAPPING` table (`q_b_proj`->`wq_b`, `o_proj`->`wo`, `gate_proj`->`w1`, `down_proj`->`w2`, `up_proj`->`w3`, ...) |
+| Slice | `dim 0` = ColumnParallel (out_features): `wq`, `wq_b`, `wkv_b`, `w1`, `w3`, `embed`, `head`. `dim 1` = RowParallel (in_features): `wo`, `w2`. `dim None` = replicated in both files |
+| Expert filter | `n_local_experts = 256 // mp`; rank r keeps experts `[r*n_local, (r+1)*n_local)`. Layer 61 (MTP head) is dropped |
+
+**Why the loader needs no key remapping:** output keys match `Transformer.state_dict()` exactly and
+the sharding lives in tensor *shapes*, not names. Both rank files have identical key sets with
+different shapes — which is also why `dist.init_process_group` must run **before**
+`Transformer(args)`, so `world_size` is baked into the parallel layers.
+
+**The indexer is NOT sharded.** Its `wq_b` / `wk` / `k_norm` / `weights_proj` all carry `dim None`,
+so all 64 `index_n_heads` are replicated on every rank. This is the checkpoint-side confirmation of
+the runtime OOM: `fp8_index` in `src/overrides/kernel.py` materializes a
+`(b, s, 64, s)` **FP32** tensor — 169 GiB at Lin=26624, which is what actually kills long-context
+prefill.
+
+Variants: `--model-parallel 1` produces `model0-mp1.safetensors` (674.1 GB, unsharded) for the DP
+paths. BF16 is a *separate* later stage — see **Generating the BF16 TP2 weights** below; this script
+never changes dtype. (`models/deepseek-v3.2-bf16/`, an HF-layout BF16 tree, is an abandoned early
+attempt: it keeps HF names and `weight_scale_inv` keys, so no launcher here can consume it.)
+
+## Generating the BF16 TP2 weights
+
+Stage 2 of the weight pipeline. Converts the FP8 TP shards to BF16 **once, offline**, so no job
+pays the ~50 min runtime dequant. Run once per rank:
+
+```bash
+A=/scratch/.../DeepSeekRun_runtime/artifacts
+for RANK in 0 1; do
+  .venv/bin/python scripts/convert_to_bf16.py \
+      --src ${A}/deepseek-v3.2-mp2-rerun/model${RANK}-mp2.safetensors \
+      --dst ${A}/deepseek-v3.2-bf16-tp2-rank${RANK}/model${RANK}-mp2.safetensors
+done
+```
+
+Per-rank subdirectories are **required**, not cosmetic: the multi-shard renamer writes
+`model-NNNNN-of-XXXXX.safetensors` under a temporary name and renames once the total count is
+known, so two ranks sharing one directory race and corrupt each other's output.
+
+Output per rank: 2 shards + `model.safetensors.index.json`, **673.8 GB / 627.5 GiB**, 23,428 keys,
+**zero `.scale` keys** — once `w_bf16 = w_fp8 * scale`, the scale is folded into the value and
+BF16's 8 exponent bits need no block rescaling. Needs ~900 GB and a few hours per rank; peak RSS
+stays near `--shard-limit-gb` (default 400) because shards are flushed and `gc.collect()`ed as they
+fill.
+
+### Running inference on them
+
+Set `BF16_CKPT_INDEX` (the literal `{RANK}` is substituted per rank):
+
+```bash
+BF16_CKPT_INDEX="${A}/deepseek-v3.2-bf16-tp2-rank{RANK}/model.safetensors.index.json"
+DEQUANT_CACHE_MODE="off"
+```
+
+It **takes precedence over `DEQUANT_CACHE_MODE`**: weights are already BF16, so there is no FP8
+load, no dequant pass and no cache write, and `ModelArgs.dtype` is forced to `bf16` before
+construction (otherwise `Linear` allocates FP8 params plus a `.scale` and the load fails).
+
+Three ways to get BF16 weights in memory, all numerically the same `w_fp8 * scale`:
+
+| | when conversion happens | config |
+|---|---|---|
+| Runtime dequant | every job (~50 min) | `DEQUANT_FP8_WEIGHTS=all`, `CACHE_MODE=off` |
+| Dequant cache | once, written by a job | `DEQUANT_FP8_WEIGHTS=all`, `CACHE_MODE=read` |
+| **Offline checkpoint** | once, by `convert_to_bf16.py` | **`BF16_CKPT_INDEX=...`** |
+
+The offline checkpoint and the dequant cache were verified to have **identical key sets**
+(23,428 keys each, exact match). They differ only in file naming and index metadata, which is why
+the loader skips its dequant-cache metadata validation for an external index.
+
+`--expert-start N --expert-end M` keeps only routed experts in `[N, M)`. That is the offline
+pruning that makes BF16 `dp2_epon` feasible — see [DP_IMPLEMENTATION_PLAN.md](DP_IMPLEMENTATION_PLAN.md).
 
 ## Config model
 
@@ -162,3 +337,27 @@ Calling `.venv/bin/python scripts/native_run.py --resolved-config <TPCHECKREAL_r
 - No imports at runtime from `../structured_cpu_run/`. The legacy artifacts dir is consumed only as a data path (`SHARDED_CKPT_PATH`).
 - Do not modify `../FlashMLA`, `../FlashMLA_CPU`, `../DeepSeek-V3.2`, or `../structured_cpu_run`.
 - Pipeline parallelism is out of scope (`PP_SIZE` must stay `1`).
+
+## TODO
+
+- ~~**Prove the two BF16 paths agree.**~~ **RESOLVED 2026-09-21** (job 27749323, `TP2BF16`). The
+  offline checkpoint (`artifacts/deepseek-v3.2-bf16-tp2-rank{0,1}`, written by
+  `scripts/convert_to_bf16.py`) and the runtime dequant cache
+  (`models/deepseek-v3.2-tp2-bf16-dequant-all`) produce **identical output**: all 2048 generated
+  tokens matched at Lin=2048/Lout=2048, and their key sets are an exact 23,428-key match. The
+  offline path emits 62 benign `dtype mismatch` warnings (`head.weight` + 61 ×
+  `indexer.weights_proj.weight`) because upstream holds those as FP32 params while the checkpoint
+  stores BF16; the loader casts on copy.
+- **DP2_EPON is not implemented.** Weights exist (`artifacts/deepseek-v3.2-bf16-dp2_epon-rank{0,1}`,
+  642.5 GiB each, offline-pruned to 128 experts per rank) and `BF16_CKPT_INDEX` already loads that
+  layout. What remains is the dist-init refactor, `src/overrides/ep_moe.py`, and a `SHARDING_MODE`
+  enum guard — see [DP_IMPLEMENTATION_PLAN.md](DP_IMPLEMENTATION_PLAN.md).
+- **Change the launcher thread-placement default.** `scripts/run_native_distributed.sh:98-99`
+  forces `OMP_PROC_BIND=close` / `OMP_PLACES=cores`, measured 5.5x slower on decode. Should
+  become `false`, with `OMP_NUM_THREADS` defaulting to 32.
+- **No chunked prefill.** Required for any context beyond ~16k: unchunked prefill transients at
+  120k are ~5 TiB (MLA scores exist twice, plus FP32 indexer logits). A working implementation
+  exists in `../structured_cpu_run/without_vllm/profiling/generate_profiled.py` and ran at 32k.
+- **Sparsity is computed but never exploited.** Both the prefill and decode branches build the
+  full dense score matrix and then apply the top-k mask additively. At 128k that is ~59x more
+  attention FLOPs than needed in prefill and ~63x in decode.
