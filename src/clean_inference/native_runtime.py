@@ -1,14 +1,22 @@
 """Native CPU inference runtime: threads, distributed init, ModelArgs build, construction.
 
-Mirrors the legacy verify_cpu.py ordering for TP2:
+Ordering differs by SHARDING_MODE, and the difference is load-bearing:
+
   1. setup_thread_env  — torch thread count, default dtype, manual seed.
-  2. initialize_distributed_if_needed  — init_process_group BEFORE construction
-     when SHARDING_MODE=tp2 and world_size>1 (so model.world_size is baked into
-     ColumnParallel/RowParallel layers). For DP modes, init runs later (handled
-     by caller).
+  2. initialize_distributed_before_construction  — TP modes only. Upstream
+     ColumnParallel/RowParallel read the module-global world_size in __init__
+     to compute per-rank shard shapes, so the process group must exist first.
+     No-op for DP modes.
   3. build_modelargs_for_case  — load native ModelArgs JSON, override dtype +
      max_batch_size + max_seq_len from runtime context.
   4. construct_transformer  — model_module.Transformer(args).
+  5. initialize_distributed_after_construction  — DP modes only. DP replicates
+     the model, so construction must see world_size==1 and build every parallel
+     layer at FULL size; initializing earlier would shard them and the
+     unsharded mp1 checkpoint would no longer match. No-op for TP modes.
+  6. assert_distributed_ready  — fail loudly if world_size>1 and no process
+     group exists. Without it, forgetting either hook degrades silently into a
+     single-rank run that produces wrong results at full speed.
 """
 
 import os
@@ -81,39 +89,80 @@ def detect_distributed_env() -> Dict[str, Any]:
     }
 
 
-def initialize_distributed_if_needed(
-    config: Dict[str, str], dist_env: Dict[str, Any], log_fn=print
-) -> bool:
-    """Initialize torch.distributed with gloo backend if SHARDING_MODE=tp2.
+TP_MODES = ("tp2",)
+DP_MODES = ("dp2", "dp2_epon")
 
-    Returns True if init_process_group was actually called this call.
 
-    For tp2 the upstream Transformer constructor requires world_size>1 at
-    construction time (ColumnParallel/RowParallel layers bake it in). For
-    dp2/dp2_epon the caller should defer init until AFTER construction.
-    """
+def _init_gloo(dist_env: Dict[str, Any], when: str, mode: str, log_fn) -> bool:
     import torch.distributed as dist
 
-    sharding_mode = config.get("SHARDING_MODE", "").lower()
     if not dist_env["is_distributed"]:
-        log_fn(f"[runtime] world_size=1 -> skipping dist init")
+        log_fn("[runtime] world_size=1 -> skipping dist init")
         return False
     if dist.is_initialized():
-        log_fn(f"[runtime] dist already initialized")
+        log_fn("[runtime] dist already initialized")
         return False
-    if sharding_mode != "tp2":
-        log_fn(
-            f"[runtime] sharding_mode={sharding_mode!r} -> dist init deferred; "
-            f"caller must init AFTER Transformer construction"
-        )
-        return False
-
     log_fn(
-        f"[runtime] dist.init_process_group('gloo') BEFORE construction "
-        f"(tp2; world_size={dist_env['world_size']}, rank={dist_env['rank']})"
+        f"[runtime] dist.init_process_group('gloo') {when} construction "
+        f"({mode}; world_size={dist_env['world_size']}, rank={dist_env['rank']})"
     )
     dist.init_process_group("gloo")
     return True
+
+
+def initialize_distributed_before_construction(
+    config: Dict[str, str], dist_env: Dict[str, Any], log_fn=print
+) -> bool:
+    """Init dist BEFORE Transformer(args). TP modes only.
+
+    Upstream ColumnParallelLinear/RowParallelLinear read the module-global
+    world_size in __init__ to compute per-rank shard shapes, so it must be
+    visible before construction. No-op for DP modes.
+    """
+    mode = config.get("SHARDING_MODE", "").lower()
+    if mode not in TP_MODES:
+        log_fn(
+            f"[runtime] sharding_mode={mode!r} is not a TP mode -> dist init "
+            f"deferred to initialize_distributed_after_construction()"
+        )
+        return False
+    return _init_gloo(dist_env, "BEFORE", mode, log_fn)
+
+
+def initialize_distributed_after_construction(
+    config: Dict[str, str], dist_env: Dict[str, Any], log_fn=print
+) -> bool:
+    """Init dist AFTER Transformer(args). DP modes only.
+
+    DP replicates the model, so construction must see world_size==1 and build
+    every parallel layer at FULL size. Initializing earlier would shard them
+    and the unsharded mp1 checkpoint would no longer match. No-op for TP modes.
+    """
+    mode = config.get("SHARDING_MODE", "").lower()
+    if mode not in DP_MODES:
+        return False
+    return _init_gloo(dist_env, "AFTER", mode, log_fn)
+
+
+def assert_distributed_ready(dist_env: Dict[str, Any], log_fn=print) -> None:
+    """Fail loudly if this is a multi-rank run with no process group.
+
+    Without this, forgetting one of the two init hooks above degrades silently
+    into a single-rank run that produces wrong results at full speed.
+    """
+    import torch.distributed as dist
+
+    if not dist_env["is_distributed"]:
+        return
+    if not dist.is_initialized():
+        _fail(
+            f"world_size={dist_env['world_size']} but torch.distributed is NOT "
+            f"initialized. Neither dist-init hook fired -- check SHARDING_MODE."
+        )
+    log_fn(
+        f"[runtime] dist ready: backend={dist.get_backend()} "
+        f"rank={dist.get_rank()}/{dist.get_world_size()}"
+    )
 
 
 def build_modelargs_for_case(

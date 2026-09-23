@@ -1,5 +1,13 @@
 #!/usr/bin/env python3
-"""Native CPU TP-aware runner. Dispatches on the resolved-config RUN_MODE.
+"""Native CPU sharding-aware runner. Dispatches on the resolved-config RUN_MODE.
+
+Supported SHARDING_MODE values (enforced by parse_config.sh):
+  tp2       — tensor parallel. dist init BEFORE construction so world_size is
+              baked into ColumnParallel/RowParallel layers; each rank loads
+              model{rank}-mp2.safetensors (or the BF16 equivalent).
+  dp2_epon  — data parallel with expert parallel. Model is REPLICATED, so dist
+              init runs AFTER construction (layers must be built full size) and
+              src/overrides/ep_moe.py replaces MoE.forward per instance.
 
 Case sources by mode
 --------------------
@@ -46,7 +54,9 @@ from src.clean_inference.native_runtime import (
     build_modelargs_for_case,
     construct_transformer,
     detect_distributed_env,
-    initialize_distributed_if_needed,
+    initialize_distributed_before_construction,
+    initialize_distributed_after_construction,
+    assert_distributed_ready,
     setup_thread_env,
 )
 from src.clean_inference.weight_loading import (
@@ -463,7 +473,7 @@ def run(
     )
 
     setup_thread_env(config, log_fn=log)
-    initialize_distributed_if_needed(config, dist_env, log_fn=log)
+    initialize_distributed_before_construction(config, dist_env, log_fn=log)
 
     bundle = import_deepseek_modules(config)
     model_module = bundle["model"]
@@ -503,6 +513,13 @@ def run(
         log(f"[native-run]   {k} = {summary[k]}")
 
     transformer = construct_transformer(model_module, args, log_fn=log)
+
+    # DP modes build every parallel layer at FULL size (world_size==1 during
+    # construction), so the process group comes up only now. TP modes already
+    # initialized before construction; both paths are then asserted ready so a
+    # missed hook fails loudly instead of running silently as a single rank.
+    initialize_distributed_after_construction(config, dist_env, log_fn=log)
+    assert_distributed_ready(dist_env, log_fn=log)
     try:
         total_params = sum(p.numel() for p in transformer.parameters())
         log(f"[native-run] total parameters (numel sum): {total_params:,}")
@@ -564,6 +581,16 @@ def run(
         load_report = load_weights_into_transformer(transformer, config, dist_env, log_fn=log)
         dequant_report = maybe_dequantize_fp8(transformer, config, log_fn=log)
         cache_write_report = maybe_write_dequant_cache(transformer, cache_plan, config, dist_env, log_fn=log)
+
+    ep_moe_report: Optional[Dict[str, Any]] = None
+    if config.get("SHARDING_MODE", "").lower() == "dp2_epon":
+        from ep_moe import install_ep_moe  # resolved via src/overrides on sys.path
+
+        ep_moe_report = install_ep_moe(
+            transformer, model_module, dist_env,
+            n_routed_experts=int(args.n_routed_experts), log_fn=log,
+        )
+        base_result["ep_moe_report"] = ep_moe_report
 
     if no_generate:
         log(
