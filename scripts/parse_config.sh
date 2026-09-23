@@ -173,6 +173,7 @@ for field in "${required_fields[@]}"; do
 done
 
 require_one_of RUN_MODE "$RUN_MODE" verify bench both generate
+require_one_of SHARDING_MODE "$SHARDING_MODE" tp2 dp2_epon
 require_one_of INFERENCE_ARCHITECTURE "$INFERENCE_ARCHITECTURE" direct_native server_client
 require_one_of WEIGHTS_PRECISION "$WEIGHTS_PRECISION" fp8 bf16
 require_one_of KV_CACHE_DTYPE "$KV_CACHE_DTYPE" fp8 bf16

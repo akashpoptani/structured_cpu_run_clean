@@ -212,6 +212,121 @@ the loader skips its dequant-cache metadata validation for an external index.
 `--expert-start N --expert-end M` keeps only routed experts in `[N, M)`. That is the offline
 pruning that makes BF16 `dp2_epon` feasible — see [DP_IMPLEMENTATION_PLAN.md](DP_IMPLEMENTATION_PLAN.md).
 
+## DP2_EPON (data parallel + expert parallel)
+
+Verified token-exact 2026-09-22 (job 27750972). Attention and dense layers are **replicated** on
+every rank; the 256 routed experts are split 128/128.
+
+| | `tp2` | `dp2_epon` |
+|---|---|---|
+| Attention / dense | sharded | **replicated** (2x duplicated FLOPs) |
+| Experts | sharded | 128 of 256 per rank |
+| Comm per MoE layer | all_reduce in MoE **and** every RowParallelLinear (`wo`, `w2`) | **one** all_reduce, in MoE only |
+| Checkpoint | `model{rank}-mp2.safetensors` | unsharded mp1, offline-pruned per rank |
+
+### Weight generation
+
+Two offline stages. Both already run; commands recorded for reproducibility.
+
+```bash
+A=/scratch/.../DeepSeekRun_runtime/artifacts
+# stage 1 — HF FP8 -> unsharded native FP8 (rename only; mp=1 means no slicing, no expert filter)
+.venv/bin/python scripts/convert_checkpoint.py \
+    --hf-ckpt-path /scratch/.../models/deepseek-v3.2 \
+    --save-path ${A}/deepseek-v3.2-mp1 --n-experts 256 --model-parallel 1
+
+# stage 2 — FP8 -> BF16 with OFFLINE expert pruning, once per rank
+for RANK in 0 1; do
+  .venv/bin/python scripts/convert_to_bf16.py \
+      --src ${A}/deepseek-v3.2-mp1/model0-mp1.safetensors \
+      --dst ${A}/deepseek-v3.2-bf16-dp2_epon-rank${RANK}/model0-mp1.safetensors \
+      --expert-start $((RANK*128)) --expert-end $(((RANK+1)*128))
+done
+```
+
+| Artifact | Size |
+|---|---|
+| `deepseek-v3.2-mp1/model0-mp1.safetensors` | 674.1 GB / 627.8 GiB, **FP8** |
+| `deepseek-v3.2-bf16-dp2_epon-rank{0,1}/` | 689.9 GB / **642.5 GiB** each, BF16 + `index.json` |
+
+**Offline pruning is mandatory, not an optimization.** `--expert-start/--expert-end` means non-local
+experts are never written, so they are never allocated. The alternative — load the full model then
+`experts[i] = None` — needs the whole model resident first, which is ~1.34 TB in BF16.
+
+### dist-init ordering (the core inversion)
+
+TP2 initializes **before** `Transformer(args)` so `world_size` is baked into the parallel layers.
+DP must do the opposite: construction has to see `world_size==1` so every layer is built **full
+size**, matching the unsharded mp1 checkpoint. `src/clean_inference/native_runtime.py` makes this
+explicit rather than relying on a comment:
+
+```python
+initialize_distributed_before_construction(config, dist_env)   # TP modes; no-op for DP
+transformer = construct_transformer(model_module, args)
+initialize_distributed_after_construction(config, dist_env)    # DP modes; no-op for TP
+assert_distributed_ready(dist_env)   # hard error if world_size>1 and no process group
+```
+
+The assertion is what makes two hooks safer than one: forgetting either becomes a loud failure
+instead of a silent single-rank run producing wrong results at full speed.
+
+### The MoE override
+
+**Mechanism: per-instance method assignment, not module shadowing.** The lane uses two different
+override techniques and they should not be confused:
+
+| Override | Technique |
+|---|---|
+| `kernel`, `fast_hadamard_transform` | **module shadowing** — `src/overrides/` is prepended to `sys.path`, so upstream's `from kernel import ...` resolves to ours |
+| `ep_moe` | **method assignment** — we import our own module (via that same `sys.path` entry) and then rebind `forward` on each MoE *instance* |
+
+```python
+ffn.forward = types.MethodType(ep_forward, ffn)   # src/overrides/ep_moe.py
+```
+
+`nn.Module.__call__` invokes `self.forward(...)`, and Python resolves instance attributes before
+class attributes, so `ffn(x)` reaches our function. Upstream `model.py` is never edited or shadowed.
+
+Three deltas vs upstream `MoE.forward`, each load-bearing:
+
+| | upstream | ours | why |
+|---|---|---|---|
+| expert range | `experts_start_idx .. experts_end_idx` | `ep_start_idx .. ep_end_idx` | upstream computes its range in `__init__` from `world_size`, which is **1** during DP construction → 0-255 on *both* ranks |
+| all_reduce | `if world_size > 1:` | **unconditional** | that guard never fires in DP (module global stays 1), so each rank would keep only its own experts' partial sum |
+| `shared_experts` | added **before** the reduce | added **after** | in TP it is sharded so a partial value is added before; in DP every rank holds the **full** copy, so adding before **double-counts it** |
+
+`MOE_REDUCE_DTYPE=bf16` halves the all_reduce payload (legacy measured it at ~16.6% of decode); it
+defaults to `fp32` and is a numerics change, so re-verify token-exact before trusting it.
+
+### Running it
+
+```bash
+bash scripts/submit_experiment.sh DPEPON_NOLOAD    # construct-only smoke, ~8 s
+bash scripts/submit_experiment.sh DPEPON_VERIFY    # token-exact verify, ~17 min
+```
+
+| Config | Purpose |
+|---|---|
+| `DPEPON_NOLOAD` | dist-init ordering + construction only. Expect **671,877,944,064** params — the FULL model. A halved count means dist came up too early and the layers were sharded. |
+| `DPEPON_VERIFY` | full load + decode, compared against `case_0001.json`. 750.0 GiB/rank peak. |
+
+Required config fields beyond the TP2 set:
+
+```bash
+SHARDING_MODE="dp2_epon"     # enum-validated; also the ONLY gate for the MoE override
+TP_SIZE=1; DP_SIZE=2; EP_SIZE=2; PP_SIZE=1
+BF16_CKPT_INDEX=".../deepseek-v3.2-bf16-dp2_epon-rank{RANK}/model.safetensors.index.json"
+DEQUANT_CACHE_MODE="off"
+```
+
+Expected load report: `loaded=23428 missing=22517 unexpected=0 shape_mismatch=0`. Every missing key
+is accounted for — 58 MoE layers x 128 non-local experts x 3 matrices = 22,272, plus 245 KV/buffer
+keys. A different number means the prune range and the checkpoint disagree.
+
+**Not yet benchmarked against TP2.** DP2_EPON trades 2x replicated attention compute for less
+communication; direction is unknown on this hardware. Legacy ran it at 48 threads while our TP2
+optimum is 32, so it needs its own thread sweep rather than inheriting 32.
+
 ## Config model
 
 - `scripts/configs/_baseline.env` defines the defaults for every field. `REAL_RUN=1` is the default; submissions go through the real distributed path.
@@ -348,10 +463,9 @@ Calling `.venv/bin/python scripts/native_run.py --resolved-config <TPCHECKREAL_r
   offline path emits 62 benign `dtype mismatch` warnings (`head.weight` + 61 ×
   `indexer.weights_proj.weight`) because upstream holds those as FP32 params while the checkpoint
   stores BF16; the loader casts on copy.
-- **DP2_EPON is not implemented.** Weights exist (`artifacts/deepseek-v3.2-bf16-dp2_epon-rank{0,1}`,
-  642.5 GiB each, offline-pruned to 128 experts per rank) and `BF16_CKPT_INDEX` already loads that
-  layout. What remains is the dist-init refactor, `src/overrides/ep_moe.py`, and a `SHARDING_MODE`
-  enum guard — see [DP_IMPLEMENTATION_PLAN.md](DP_IMPLEMENTATION_PLAN.md).
+- ~~**DP2_EPON is not implemented.**~~ **DONE 2026-09-22** (job 27750972): token-exact PASS against
+  `case_0001.json`, 750.0 GiB/rank, 17 min. Not yet benchmarked against TP2 at Lin=2048 — legacy ran
+  it at 48 threads while our TP2 optimum is 32, so the thread count needs its own sweep.
 - **Change the launcher thread-placement default.** `scripts/run_native_distributed.sh:98-99`
   forces `OMP_PROC_BIND=close` / `OMP_PLACES=cores`, measured 5.5x slower on decode. Should
   become `false`, with `OMP_NUM_THREADS` defaulting to 32.
