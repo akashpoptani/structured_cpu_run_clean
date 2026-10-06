@@ -595,7 +595,8 @@ def run(
 
         ep_moe_report = install_ep_moe(
             transformer, model_module, dist_env,
-            n_routed_experts=int(args.n_routed_experts), log_fn=log,
+            n_routed_experts=int(args.n_routed_experts),
+            ep_size=int(config.get("EP_SIZE") or 0), log_fn=log,
         )
         base_result["ep_moe_report"] = ep_moe_report
 

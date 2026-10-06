@@ -91,6 +91,7 @@ def install_ep_moe(
     model_module: Any,
     dist_env: Dict[str, Any],
     n_routed_experts: int,
+    ep_size: int,
     log_fn=print,
 ) -> Dict[str, Any]:
     """Prune non-local experts and bind the EP-aware MoE forward.
@@ -102,6 +103,14 @@ def install_ep_moe(
 
     rank = int(dist_env["rank"])
     world_size = int(dist_env["world_size"])
+    # The split below is n_routed_experts // world_size, so EP_SIZE is only
+    # descriptive unless it matches. Without this, EP_SIZE=1 would still shard
+    # experts across both ranks and the config would silently misreport.
+    if ep_size != world_size:
+        raise ValueError(
+            f"EP_SIZE={ep_size} != world_size={world_size}; the EP split is driven "
+            f"by world_size, so these must agree (set EP_SIZE={world_size})"
+        )
     if n_routed_experts % world_size != 0:
         raise ValueError(
             f"n_routed_experts={n_routed_experts} not divisible by world_size={world_size}"

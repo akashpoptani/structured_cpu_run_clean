@@ -193,6 +193,17 @@ if [[ "$PP_SIZE" != "1" ]]; then
   die "PP_SIZE must remain 1 because pipeline parallelism is out of scope; got: $PP_SIZE"
 fi
 
+# EP_SIZE is descriptive: the expert split is driven by world_size, never by this
+# field. Upstream MoE.__init__ shards experts by rank unconditionally, so experts
+# are expert-parallel in BOTH modes -- tp2 included. Only the dp2_epon case is
+# checked here, because install_ep_moe is the only code path that consumes EP_SIZE.
+#
+# NOTE: the tp2 configs declaring EP_SIZE=1 are mislabelled -- they really run
+# 128 experts/rank. Left alone for now; correcting them touches ~20 files.
+if [[ "$SHARDING_MODE" == "dp2_epon" && "$EP_SIZE" != "$DP_SIZE" ]]; then
+  die "SHARDING_MODE=dp2_epon requires EP_SIZE == DP_SIZE (world_size); got EP_SIZE=$EP_SIZE DP_SIZE=$DP_SIZE"
+fi
+
 if [[ "$FORMAT" == "env" ]]; then
   env_fields=(
     TAG
