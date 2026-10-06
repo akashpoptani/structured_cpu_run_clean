@@ -95,7 +95,7 @@ elif [[ "${NATIVE_NO_GENERATE:-0}" == "1" ]]; then
 fi
 
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-32}"
-export OMP_PROC_BIND="${OMP_PROC_BIND:-close}"
+export OMP_PROC_BIND="${OMP_PROC_BIND:-false}"
 export OMP_PLACES="${OMP_PLACES:-cores}"
 export MKL_NUM_THREADS="$OMP_NUM_THREADS"
 export SHARDING_MODE="${SHARDING_MODE:-tp2}"
