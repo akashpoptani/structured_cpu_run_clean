@@ -582,6 +582,13 @@ def run(
         dequant_report = maybe_dequantize_fp8(transformer, config, log_fn=log)
         cache_write_report = maybe_write_dequant_cache(transformer, cache_plan, config, dist_env, log_fn=log)
 
+    indexer_bcast_report: Optional[Dict[str, Any]] = None
+    if (config.get("SKIP_INDEXER_BROADCAST") or "1").strip() == "1":
+        from indexer_broadcast import install_indexer_broadcast_skip  # src/overrides
+
+        indexer_bcast_report = install_indexer_broadcast_skip(model_module, log_fn=log)
+        base_result["indexer_bcast_report"] = indexer_bcast_report
+
     ep_moe_report: Optional[Dict[str, Any]] = None
     if config.get("SHARDING_MODE", "").lower() == "dp2_epon":
         from ep_moe import install_ep_moe  # resolved via src/overrides on sys.path

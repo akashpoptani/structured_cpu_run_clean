@@ -333,6 +333,7 @@ optimum is 32, so it needs its own thread sweep rather than inheriting 32.
 - Each experiment is one override file `scripts/configs/<TAG>_<runmode>_<sharding>_lin<LIN>_lout<LOUT>_bs<BS>_n<NODES>_c<CORES>_mem<MEM>_tprof<0|1>_mprof<0|1>.env` containing only the values that differ from baseline plus experiment identity.
 - `scripts/parse_config.sh` enforces the schema (required fields, enum values, `PP_SIZE=1` invariant) and emits either human-readable output or `KEY=$'value'` env lines.
 - To run a new experiment: copy an existing override, edit fields, then `bash scripts/submit_experiment.sh <TAG>`. Do not edit Python scripts for normal experiment-shape changes.
+- `SKIP_INDEXER_BROADCAST=1` (default) suppresses the Indexer's cross-rank debug broadcast (upstream `model.py:485`) via `src/overrides/indexer_broadcast.py`, dropping 61 discarded collectives per forward. **Not yet verified token-exact on hardware** — set `0` to restore upstream behavior. See [docs/CONFIG_SCHEMA.md](docs/CONFIG_SCHEMA.md) §9.
 
 ## Current real configs
 

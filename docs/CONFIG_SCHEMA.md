@@ -100,7 +100,28 @@ Pipeline parallelism is schema-visible but out of scope.
 - `TP_SIZE`, `DP_SIZE`, and `EP_SIZE` describe the intended CPU sharding shape.
 - `SHARDING_MODE` is the high-level mode name used to select behavior.
 
-## 9. REAL_RUN gate and sharded checkpoint path
+## 9. SKIP_INDEXER_BROADCAST
+
+Upstream `Indexer.forward` (`model.py:485`) ends with a `dist.broadcast` into a *clone* of
+`topk_indices`, asserts the clone matches, and returns the *original*. The received data is
+discarded, so it is a cross-rank consistency assertion rather than a computation.
+
+Every rank already derives `topk_indices` identically: `qr` comes from `MLA.wq_a`, a plain
+`Linear` (not column-parallel), and the Indexer's `wq_b` / `wk` / `k_norm` / `weights_proj` all
+map with dim `None` in `convert.py`, i.e. replicated.
+
+- `1` (default): suppress it. Removes 61 discarded collectives per forward. At prefill with
+  `seqlen=2048` each is ~33.5 MB of int64, so ~2 GB per forward is no longer moved.
+- `0`: leave upstream behavior intact, for A/B-ing the token-exactness claim.
+
+Implemented in `src/overrides/indexer_broadcast.py` as a shim bound onto `model.py`'s module-global
+`dist`, which forwards every attribute except `broadcast`. `torch.distributed` itself is untouched.
+
+**Temporary.** True DP (plan item 7) makes suppression mandatory — under sharded batches ranks
+legitimately hold different tokens and the assert would fail — at which point this field should be
+removed and the shim made unconditional.
+
+## 10. REAL_RUN gate and sharded checkpoint path
 
 `REAL_RUN` is `1` by default in the baseline now. `submit_experiment.sh` always generates a real distributed sbatch that calls `scripts/run_native_distributed.sh`; the mock `run_case.sh` placeholder is no longer reachable through the main launcher. `REAL_RUN` stays plumbed through the schema so future tooling (e.g. a richer dry-run mode) can still distinguish.
 
@@ -117,7 +138,7 @@ Cache compatibility is checked on read against **model identity + TP topology on
 
 **`SBATCH_CPUS_PER_TASK`, `OMP_NUM_THREADS`, partition, account, node names, and SLURM job id are intentionally NOT part of cache compatibility.** The same TP2 cache is readable under `c=1` or `c=96`; only performance changes. If `TP_SIZE` / `world_size` changes, use a different `DEQUANT_CACHE_PATH` — the shards are world-size-specific by construction. Memory must remain high (≥800 GB / rank) regardless of cores, because the BF16 cached state is ~676 GB / rank.
 
-## 10. Native ModelArgs config
+## 11. Native ModelArgs config
 
 `MODEL_ARGS_CONFIG_PATH` points at the native DeepSeek ModelArgs JSON consumed directly by `../DeepSeek-V3.2/inference/model.py`. Default: `../DeepSeek-V3.2/inference/config_671B_v3.2.json`.
 
@@ -126,7 +147,7 @@ Cache compatibility is checked on read against **model identity + TP topology on
 - `MODEL_ARGS_CONFIG_PATH` is *not* the HF-style `<ACTIVE_MODEL_PATH>/config.json`. The HF file is checkpoint metadata only and is not used by the native ModelArgs path.
 - `dtype`, `max_batch_size`, and `max_seq_len` must come from runtime/experiment configuration (resolved env + CLI), not from this JSON. `max_seq_len` in particular is a runtime KV/RoPE allocation limit and must not be auto-mapped from any checkpoint `max_position_embeddings` value.
 
-## 11. Precision Scope
+## 12. Precision Scope
 
 `WEIGHTS_PRECISION` and `KV_CACHE_DTYPE` are separate concepts.
 
