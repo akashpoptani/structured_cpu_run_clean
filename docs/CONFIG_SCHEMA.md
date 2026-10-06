@@ -66,28 +66,13 @@ Supported schema values:
 
 `RUN_MODE` controls the high-level behavior. A separate `VERIFY_ENABLED` field is intentionally not included.
 
-## 5. INFERENCE_ARCHITECTURE
-
-Supported schema values:
-
-- `direct_native`: direct PyTorch `model.forward` execution path.
-- `server_client`: future mode for a persistent service-style execution path.
-
-`server_client` is future-facing and not implemented yet.
-
-## 6. STREAMING
-
-`STREAMING` means token/output streaming: exposing tokens or results incrementally as they are generated instead of only after the full decode finishes.
-
-For `direct_native`, `STREAMING` should currently remain `0`.
-
-## 7. SESSION_MODE
+## 5. SESSION_MODE
 
 `SESSION_MODE` means one allocation/session can run multiple cases without restarting everything.
 
 This is an important future feature for reducing repeated setup cost, but it is not implemented yet.
 
-## 8. BATCH_SIZE
+## 6. BATCH_SIZE
 
 `BATCH_SIZE` is the number of prompts processed together.
 
@@ -95,7 +80,7 @@ It is not the same thing as concurrency.
 
 `CONCURRENCY` is intentionally not included right now. The first clean config layer should describe the model workload, not a future serving/request scheduler.
 
-## 9. Verification Controls
+## 7. Verification Controls
 
 Verification behavior is controlled by `RUN_MODE` plus `GPU_REFERENCE_PATH` for now.
 
@@ -107,7 +92,7 @@ The following fields are intentionally not included:
 
 Token comparison is implied by `RUN_MODE=verify` or `RUN_MODE=both` until the clean verification design becomes more explicit.
 
-## 10. Parallelism Scope
+## 8. Parallelism Scope
 
 Pipeline parallelism is schema-visible but out of scope.
 
@@ -115,7 +100,7 @@ Pipeline parallelism is schema-visible but out of scope.
 - `TP_SIZE`, `DP_SIZE`, and `EP_SIZE` describe the intended CPU sharding shape.
 - `SHARDING_MODE` is the high-level mode name used to select behavior.
 
-## 11. REAL_RUN gate and sharded checkpoint path
+## 9. REAL_RUN gate and sharded checkpoint path
 
 `REAL_RUN` is `1` by default in the baseline now. `submit_experiment.sh` always generates a real distributed sbatch that calls `scripts/run_native_distributed.sh`; the mock `run_case.sh` placeholder is no longer reachable through the main launcher. `REAL_RUN` stays plumbed through the schema so future tooling (e.g. a richer dry-run mode) can still distinguish.
 
@@ -132,7 +117,7 @@ Cache compatibility is checked on read against **model identity + TP topology on
 
 **`SBATCH_CPUS_PER_TASK`, `OMP_NUM_THREADS`, partition, account, node names, and SLURM job id are intentionally NOT part of cache compatibility.** The same TP2 cache is readable under `c=1` or `c=96`; only performance changes. If `TP_SIZE` / `world_size` changes, use a different `DEQUANT_CACHE_PATH` — the shards are world-size-specific by construction. Memory must remain high (≥800 GB / rank) regardless of cores, because the BF16 cached state is ~676 GB / rank.
 
-## 12. Native ModelArgs config
+## 10. Native ModelArgs config
 
 `MODEL_ARGS_CONFIG_PATH` points at the native DeepSeek ModelArgs JSON consumed directly by `../DeepSeek-V3.2/inference/model.py`. Default: `../DeepSeek-V3.2/inference/config_671B_v3.2.json`.
 
@@ -141,7 +126,7 @@ Cache compatibility is checked on read against **model identity + TP topology on
 - `MODEL_ARGS_CONFIG_PATH` is *not* the HF-style `<ACTIVE_MODEL_PATH>/config.json`. The HF file is checkpoint metadata only and is not used by the native ModelArgs path.
 - `dtype`, `max_batch_size`, and `max_seq_len` must come from runtime/experiment configuration (resolved env + CLI), not from this JSON. `max_seq_len` in particular is a runtime KV/RoPE allocation limit and must not be auto-mapped from any checkpoint `max_position_embeddings` value.
 
-## 13. Precision Scope
+## 11. Precision Scope
 
 `WEIGHTS_PRECISION` and `KV_CACHE_DTYPE` are separate concepts.
 

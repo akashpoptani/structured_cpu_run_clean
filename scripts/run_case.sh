@@ -50,7 +50,6 @@ SBATCH_CPUS_PER_TASK: $SBATCH_CPUS_PER_TASK
 OMP_NUM_THREADS: $OMP_NUM_THREADS
 MEM_PROFILE: $MEM_PROFILE
 TIME_PROFILE: $TIME_PROFILE
-INFERENCE_ARCHITECTURE: $INFERENCE_ARCHITECTURE
 SESSION_MODE: $SESSION_MODE
 EOF
 
@@ -80,24 +79,6 @@ case "$RUN_MODE" in
     ;;
   *)
     echo "ERROR: unknown RUN_MODE: $RUN_MODE" >&2
-    exit 1
-    ;;
-esac
-
-echo
-case "$INFERENCE_ARCHITECTURE" in
-  direct_native)
-    echo "INFERENCE_ARCHITECTURE=direct_native"
-    echo "TODO: next safe command is scripts/model_preflight.py"
-    echo "TODO: use direct PyTorch model.forward / torch.distributed.run path"
-    ;;
-  server_client)
-    echo "INFERENCE_ARCHITECTURE=server_client"
-    echo "TODO: server/client mode is future-facing and not implemented yet"
-    exit 1
-    ;;
-  *)
-    echo "ERROR: unknown INFERENCE_ARCHITECTURE: $INFERENCE_ARCHITECTURE" >&2
     exit 1
     ;;
 esac

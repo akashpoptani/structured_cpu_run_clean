@@ -28,7 +28,7 @@ sbatch
   -> sys.path override insertion
   -> Transformer construction
   -> weight loading
-  -> optional EP pruning / monkey patches / dequant / FAST_LINEAR
+  -> optional EP pruning / monkey patches / dequant
   -> prefill
   -> decode
   -> verify tokens or print timing
@@ -55,7 +55,7 @@ Important details:
 - `../structured_cpu_run/without_vllm/overrides/dequant_weights.py`: runtime FP8 weight dequantization support.
 - `../structured_cpu_run/without_vllm/overrides/run_config.py`: env/config bridge used by current scripts, with incomplete launch authority.
 - `../structured_cpu_run/without_vllm/overrides/generate_cpu.py`: older CPU generation entry point; useful reference, but not the current milestone path.
-- `../structured_cpu_run/without_vllm/overrides/fast_linear.py`: optional FAST_LINEAR monkey patch for decode GEMV.
+- `../structured_cpu_run/without_vllm/overrides/fast_linear.py`: optional decode GEMV monkey patch.
 - `../structured_cpu_run/without_vllm/overrides/fused_expert.py`: optional fused expert monkey patch.
 - `../structured_cpu_run/without_vllm/overrides/batched_moe.py`: experimental batched MoE patch, currently not a first migration target.
 - `../structured_cpu_run/without_vllm/overrides/skip_indexer_broadcast.py`: optional Indexer broadcast skip patch.

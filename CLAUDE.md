@@ -67,11 +67,11 @@ Temporary fallback when the clean `.venv` is not yet built: the old known-good v
 2. A `<TAG>_*.env` override file (naming: `<TAG>_<runmode>_<sharding>_lin<LIN>_lout<LOUT>_bs<BS>_n<NODES>_c<CORES>_mem<MEM>_tprof<0|1>_mprof<0|1>.env`) holds only changed values plus experiment identity.
 3. `parse_config.sh` sources baseline then the single matching override, derives `ACTIVE_MODEL_PATH` from `WEIGHTS_PRECISION`, validates enums and required fields, and emits either human or `KEY=$'value'` env output (consumed via `eval`).
 4. `submit_experiment.sh` calls the parser, snapshots the resolved env to `results_clean/resolved_configs/<TAG>_resolved.env`, and writes a placeholder sbatch under `tmp/sbatch/` that would `bash scripts/run_case.sh <resolved_config>`.
-5. `run_case.sh` sources the resolved config and dispatches by `RUN_MODE` (`verify`/`bench`/`both`/`generate`) and `INFERENCE_ARCHITECTURE` (`direct_native` only; `server_client` is schema-visible but exits non-zero). `verify` currently calls the mock `run_verify.py`.
+5. `run_case.sh` sources the resolved config and dispatches by `RUN_MODE` (`verify`/`bench`/`both`/`generate`). `verify` currently calls the mock `run_verify.py`.
 
 The resolved-config env file is the **handoff contract** between shell and Python — `run_verify.py` and `inference_import_smoke.py` both parse it via `parse_resolved_env` (`scripts/run_verify.py:43`).
 
-See `docs/CONFIG_SCHEMA.md` for field semantics: `RUN_MODE`, `INFERENCE_ARCHITECTURE`, `STREAMING`, `SESSION_MODE`, `BATCH_SIZE` (not concurrency), precision (`WEIGHTS_PRECISION` ≠ `KV_CACHE_DTYPE`), and sharding (`TP_SIZE`/`DP_SIZE`/`EP_SIZE`, `SHARDING_MODE`).
+See `docs/CONFIG_SCHEMA.md` for field semantics: `RUN_MODE`, `SESSION_MODE`, `BATCH_SIZE` (not concurrency), precision (`WEIGHTS_PRECISION` ≠ `KV_CACHE_DTYPE`), and sharding (`TP_SIZE`/`DP_SIZE`/`EP_SIZE`, `SHARDING_MODE`).
 
 ### Override import ordering (the key inference-bring-up invariant)
 
