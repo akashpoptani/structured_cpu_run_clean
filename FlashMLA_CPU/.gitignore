@@ -1,0 +1,12 @@
+# Benchmark inputs: large, regenerable, not pushed.
+# The .pt dumps are the source of truth and are kept in-tree but untracked;
+# bins/ and sparse_bins/ are derived from them by the *_pt_to_bin.py scripts.
+*.pt
+bins/
+sparse_bins/
+
+# Compiled benchmarks
+bench_sparse_amx
+bench_sparse_onednn
+bench_dense_amx
+bench_dense_onednn
