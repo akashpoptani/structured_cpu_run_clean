@@ -61,9 +61,11 @@ echo
 echo "Set PROMPT_CORPUS_PATH to: $DEST"
 echo
 if [[ -s "$DEST/index.json" ]]; then
-  echo "[fetch] index.json present. Re-run the indexer if you added a task above:"
+  echo "[fetch] local index.json present (takes precedence over the committed one)."
 else
-  echo "[fetch] NEXT STEP -- the corpus is unusable without an index. Run:"
+  echo "[fetch] No local index -- the committed one at"
+  echo "        verification/corpus/infinitebench_index.json will be used. That is"
+  echo "        correct for the stock task list; rebuild only if you changed it:"
 fi
 cat <<EOF
   .venv/bin/python scripts/build_corpus_index.py \\

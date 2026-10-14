@@ -32,6 +32,7 @@ slot-wise now rather than being retrofitted later.
 import hashlib
 import json
 import os
+from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 # Natural-language tasks only, ordered so that consecutive batch slots differ by
@@ -65,13 +66,26 @@ TASKS: List[str] = [
 
 INDEX_NAME = "index.json"
 
+# Committed copy of the index, so a fresh clone can use the corpus as soon as
+# the .jsonl files are fetched, without the ~15 min indexing pass. It is valid
+# because InfiniteBench is a fixed published dataset: record N of a task file is
+# the same text for everyone, so the token counts are reproducible rather than
+# machine-specific. A locally built index still wins if one is present -- that
+# is the one to trust if you ever point PROMPT_CORPUS_PATH at a modified corpus.
+VENDORED_INDEX = (
+    Path(__file__).resolve().parents[2] / "verification" / "corpus"
+    / "infinitebench_index.json"
+)
+
 
 def load_index(corpus_dir: str) -> Dict[str, List[Dict[str, Any]]]:
-    """Exact per-record token counts from scripts/build_corpus_index.py."""
-    path = os.path.join(corpus_dir, INDEX_NAME)
+    """Exact per-record token counts, local index preferred over the vendored one."""
+    local = os.path.join(corpus_dir, INDEX_NAME)
+    path = local if os.path.isfile(local) else str(VENDORED_INDEX)
     if not os.path.isfile(path):
         raise FileNotFoundError(
-            f"no {INDEX_NAME} in {corpus_dir}; run:\n"
+            f"no {INDEX_NAME} in {corpus_dir} and no vendored index at "
+            f"{VENDORED_INDEX}; run:\n"
             f"  .venv/bin/python scripts/build_corpus_index.py "
             f"--corpus-dir {corpus_dir} --tokenizer-dir <tokenizer dir>"
         )

@@ -264,9 +264,14 @@ bash scripts/fetch_infinitebench.sh
 INFINITEBENCH_DIR=/path/to/corpora/infinitebench bash scripts/fetch_infinitebench.sh
 ```
 
-Then build the token index — **the corpus is unusable without it**. Eligibility
-("does this record have >= LIN_TOKENS tokens?") is read from exact cached counts,
-never estimated from character length:
+A token index ships with the repo at `verification/corpus/infinitebench_index.json`,
+so once the `.jsonl` files are fetched the corpus works immediately — no indexing
+pass needed. Eligibility ("does this record have >= LIN_TOKENS tokens?") is read
+from exact cached counts, never estimated from character length.
+
+Rebuild it only if you add a task, change the tokenizer, or point
+`PROMPT_CORPUS_PATH` at a modified corpus. A locally built `index.json` in the
+corpus directory takes precedence over the committed one:
 
 ```bash
 .venv/bin/python scripts/build_corpus_index.py \
@@ -276,7 +281,9 @@ never estimated from character length:
 
 ~15 min on one login-node core for 1,866 records; writes `index.json` beside the
 `.jsonl` files and checkpoints per task. Re-running after adding a task only
-indexes the new one (pass `--force` to redo everything).
+indexes the new one (pass `--force` to redo everything). Copy the result over
+`verification/corpus/infinitebench_index.json` if you want the repo default to
+match.
 
 Switch a config from the pangram seed to real documents:
 

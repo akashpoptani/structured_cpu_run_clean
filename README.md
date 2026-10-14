@@ -345,11 +345,24 @@ every ~80 tokens. LMSYS-Chat-1M is longer but still chat-scale, and is HF-gated.
 records are single coherent documents already past 100k tokens, so a long prompt is one real
 document truncated. It is ungated.
 
-Fetch once from a login node (~333 MB, stored outside the repo):
+Fetch once from a login node (~1.1 GB, stored outside the repo):
 
 ```bash
 bash scripts/fetch_infinitebench.sh
 ```
+
+That is the only setup step. Record eligibility ("does this document have at
+least `LIN_TOKENS` tokens?") is answered from exact per-record token counts in
+`verification/corpus/infinitebench_index.json`, which is committed — the
+InfiniteBench records are a fixed published dataset, so the counts are the same
+for everyone and need not be rebuilt. `scripts/build_corpus_index.py` regenerates
+it if you add a task or change tokenizer; a local `index.json` in the corpus
+directory wins over the committed one.
+
+Why exact counts rather than a chars-per-token estimate: the ratio ranges from
+1.36 (Chinese) to 4.74 (English prose) *across* tasks and 2.68-4.51 *within*
+`code_debug` alone. Every character-based bound tried here was wrong in one
+direction or the other, silently dropping eligible records.
 
 Four natural-language tasks are vendored. The synthetic InfiniteBench tasks (`math_find`,
 `passkey`, `kv_retrieval`, `number_string`) are deliberately excluded — `math_find`'s context is a

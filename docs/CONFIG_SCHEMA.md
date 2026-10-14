@@ -140,6 +140,11 @@ Valid `PROMPT_TASK` values: `longbook_sum_eng`, `code_debug`, `longdialogue_qa_e
 `longbook_qa_eng`. Pinning gives a **homogeneous** batch (one domain, distinct records per slot);
 empty gives a **heterogeneous** batch (slot *i* round-robins across domains).
 
+Eligibility uses the exact per-record token counts in
+`verification/corpus/infinitebench_index.json` (committed; regenerate with
+`scripts/build_corpus_index.py`). A local `index.json` inside `PROMPT_CORPUS_PATH`
+takes precedence.
+
 The parser rejects `PROMPT_SOURCE=infinitebench` when `PROMPT_CORPUS_PATH` is empty or missing,
 so a bad path fails at parse time rather than after a multi-minute weight load. Fetch the corpus
 with `bash scripts/fetch_infinitebench.sh` from a login node.
