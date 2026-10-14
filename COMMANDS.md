@@ -252,3 +252,60 @@ bash scripts/submit_experiment.sh <config_tag>
 bash scripts/check_run.sh <job_id> "LATER"
 bash scripts/append_to_results.sh <job_id> <config_tag> "LATER"
 ```
+
+## Prompt corpus (InfiniteBench)
+
+Fetch once **from a login node** — compute nodes have no outbound network. ~333 MB,
+written outside the repo (never committed):
+
+```bash
+bash scripts/fetch_infinitebench.sh
+# override the destination:
+INFINITEBENCH_DIR=/path/to/corpora/infinitebench bash scripts/fetch_infinitebench.sh
+```
+
+Then build the token index — **the corpus is unusable without it**. Eligibility
+("does this record have >= LIN_TOKENS tokens?") is read from exact cached counts,
+never estimated from character length:
+
+```bash
+.venv/bin/python scripts/build_corpus_index.py \
+    --corpus-dir /scratch/.../corpora/infinitebench \
+    --tokenizer-dir /scratch/.../deepseek-v3.2-mp2-rerun
+```
+
+~15 min on one login-node core for 1,866 records; writes `index.json` beside the
+`.jsonl` files and checkpoints per task. Re-running after adding a task only
+indexes the new one (pass `--force` to redo everything).
+
+Switch a config from the pangram seed to real documents:
+
+```bash
+PROMPT_SOURCE="infinitebench"
+PROMPT_CORPUS_PATH="/scratch/.../corpora/infinitebench"
+PROMPT_SEED=0            # same seed -> identical prompts
+PROMPT_TASK=""           # "" = round-robin across domains; or pin one
+```
+
+Homogeneous vs heterogeneous batches — the two operating points to compare:
+
+```bash
+PROMPT_TASK="code_debug"   # homogeneous: every slot from one domain
+PROMPT_TASK=""             # heterogeneous: slot i round-robins across domains
+```
+
+Check a prompt without submitting a job:
+
+```bash
+.venv/bin/python -c "
+import sys; sys.path.insert(0,'.')
+from src.clean_inference.tokenization import load_tokenizer
+from src.clean_inference.prompting import build_synthetic_cases
+cfg={'CLEAN_ROOT':'.','TOKENIZER_PATH':'','ACTIVE_MODEL_PATH':'','TAG':'T',
+     'SHARDED_CKPT_PATH':'/scratch/.../deepseek-v3.2-mp2-rerun',
+     'PROMPT_SOURCE':'infinitebench','PROMPT_SEED':'0','PROMPT_TASK':'',
+     'PROMPT_CORPUS_PATH':'/scratch/.../corpora/infinitebench'}
+tok,_=load_tokenizer(cfg, log_fn=lambda m: None)
+print(build_synthetic_cases(tok, 2048, 15, 1, 'T', config=cfg)[0]['source'])
+"
+```

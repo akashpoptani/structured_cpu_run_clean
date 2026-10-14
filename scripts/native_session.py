@@ -278,7 +278,7 @@ def _run_child(
                                             "failed_cases": v["failed_cases"]}
 
     if run_mode == "generate":
-        synth = build_synthetic_cases(tokenizer, lin, lout, bs, tag)
+        synth = build_synthetic_cases(tokenizer, lin, lout, bs, tag, config=cfg)
         log(f"[session]   synth lin_actual={encode_len(tokenizer, synth[0]['prompt_text'])}")
         out = nr._run_generate_phase(
             transformer, tokenizer, synth,
@@ -288,7 +288,7 @@ def _run_child(
         return 0, {"out_path": str(out["out_path"])}
 
     if run_mode == "bench":
-        synth = build_synthetic_cases(tokenizer, lin, lout, bs, tag)
+        synth = build_synthetic_cases(tokenizer, lin, lout, bs, tag, config=cfg)
         log(f"[session]   synth lin_actual={encode_len(tokenizer, synth[0]['prompt_text'])}")
         out = nr._run_bench_phase(
             transformer, tokenizer, synth,
@@ -320,7 +320,7 @@ def _run_child(
             nr._write_result(cfg, both_summary, is_root, nr.RUN_MODE_RESULT_FILENAME["both"])
             return 1, {"verify_path": str(v["out_path"]), "bench_path": None}
 
-        synth = build_synthetic_cases(tokenizer, lin, lout, bs, tag)
+        synth = build_synthetic_cases(tokenizer, lin, lout, bs, tag, config=cfg)
         bench_base = dict(base_result)
         bench_base["total_cases"] = len(synth)
         b = nr._run_bench_phase(

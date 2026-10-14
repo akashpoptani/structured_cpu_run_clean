@@ -242,3 +242,32 @@ One checkpoint, either layout, no expert reshuffling.
   Measure skew before optimising.
 - **Per-phase thread counts.** Prefill (compute-bound) and decode (bandwidth-bound) likely want
   different `OMP_NUM_THREADS`; `torch.set_num_threads()` is settable at runtime.
+- **`TP2_EPOFF` — TP-shard the experts instead of expert-parallelising them.** Every rank would hold
+  all 256 routed experts with each expert's matrices split (`w1`/`w3` column-parallel, `w2`
+  row-parallel), the way the dense MLP already works. **Parked: the payoff is likely negative.**
+
+  Note EP is *always on* today, in both modes: `MoE.__init__` (upstream `model.py`) computes
+  `n_local_experts = n_routed_experts // world_size` unconditionally — there is no TP-vs-EP branch.
+  Under `tp2`, `world_size=2`, so each rank already builds 128 of 256. Current `tp2` is really
+  "TP2 + EP on". The `EP_SIZE=1` in the tp2 configs is mislabelling, not a different mode.
+
+  | | Memory/rank | all_reduce per forward |
+  |---|---|---:|
+  | EP (today) | experts/2 | **58** (one per MoE layer) |
+  | `TP2_EPOFF` | experts/2 — identical | **464** (58 x 8 activated experts) |
+
+  No memory is saved: EP gives half the experts whole, EPOFF gives all the experts halved. But
+  row-parallel `w2` forces an all_reduce per *activated* expert, so collectives go up ~8x. On gloo
+  over TCP that is a serious regression, and item 1's measurements already show collectives are what
+  hurts prefill.
+
+  Cost to build, beyond the above: `convert.py:72-79` assigns routed experts **whole** (the `if`
+  branch) and dim-splits everything else (the `elif`). Non-local experts hit `continue` and are
+  never written, so the existing TP2 shards **physically lack 128 of 256 experts** — `TP2_EPOFF`
+  needs a fresh ~650 GB conversion from the HF weights, not a reshuffle. Plus an `Expert` override
+  swapping `Linear` for the parallel variants, the deferred-dist-init construction path so all 256
+  build before the swap, new weight-loading key handling, and a `SHARDING_MODE` enum entry.
+
+  **Revisit only if expert load imbalance shows up in a profile.** Perfect balance is the one thing
+  EPOFF buys. If skew is real, hot-expert replication (above) and expert-choice routing are far
+  cheaper cures — measure the routing histogram from item 5 first.

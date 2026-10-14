@@ -24,7 +24,7 @@ The fox sentence comes from the legacy bench reference. Other seeds add
 prompt diversity without changing the exactness guarantee.
 """
 
-from typing import Any, Dict, Iterable, List
+from typing import Any, Dict, Iterable, List, Optional
 
 
 SEEDS: List[str] = [
@@ -106,8 +106,15 @@ def build_synthetic_cases(
     lout_tokens: int,
     batch_size: int,
     tag_or_label: str,
+    config: Optional[Dict[str, str]] = None,
 ) -> List[Dict[str, Any]]:
     """Return one synthetic case per batch slot for the gen/bench paths.
+
+    `config["PROMPT_SOURCE"]` selects the prompt source. "synthetic" (default)
+    repeats a pangram seed -- fine for memory/latency sweeps, but it produces
+    degenerate expert routing, so anything content-dependent should use
+    "infinitebench", which draws a real long document per slot (see
+    `corpus.py`). Everything else about the case dict is identical either way.
 
     For BS=1 we use SEEDS[0]. For BS>1 we cycle through SEEDS so different
     cases get different prompt content. Each case carries the full
@@ -125,10 +132,31 @@ def build_synthetic_cases(
             f"build_synthetic_cases currently supports batch_size=1; got {batch_size}"
         )
 
+    model_max = getattr(tokenizer, "model_max_length", None)
+    if isinstance(model_max, int) and 0 < model_max < lin_tokens:
+        raise ValueError(
+            f"lin_tokens={lin_tokens} exceeds the model context length "
+            f"({model_max}); no prompt source can produce a usable prompt"
+        )
+
+    cfg = config or {}
+    source = (cfg.get("PROMPT_SOURCE") or "synthetic").strip().lower()
+    corpus_dir = (cfg.get("PROMPT_CORPUS_PATH") or "").strip()
+    corpus_seed = int(cfg.get("PROMPT_SEED") or 0)
+    corpus_task = (cfg.get("PROMPT_TASK") or "").strip() or None
+
     cases: List[Dict[str, Any]] = []
     for slot in range(batch_size):
         seed = SEEDS[slot % len(SEEDS)]
-        prompt_text = build_exact_prompt(tokenizer, lin_tokens, seed_text=seed)
+        if source == "infinitebench":
+            from .corpus import build_exact_prompt_from_corpus
+            prompt_text, provenance = build_exact_prompt_from_corpus(
+                tokenizer, lin_tokens, corpus_dir,
+                slot=slot, n_slots=batch_size, seed=corpus_seed, task=corpus_task,
+            )
+        else:
+            prompt_text = build_exact_prompt(tokenizer, lin_tokens, seed_text=seed)
+            provenance = {"kind": "synthetic_exact_prompt", "seed_text": seed}
         cases.append({
             "case_id": f"synthetic_lin{lin_tokens}_lout{lout_tokens}_bs{batch_size}_case_{slot + 1:04d}",
             "tag": tag_or_label,
@@ -149,8 +177,7 @@ def build_synthetic_cases(
             },
             "expected_output_token_ids": None,
             "source": {
-                "kind": "synthetic_exact_prompt",
-                "seed_text": seed,
+                **provenance,
                 "encoded_prompt_length": encode_len(tokenizer, prompt_text),
             },
         })

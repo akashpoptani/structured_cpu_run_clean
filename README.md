@@ -327,6 +327,64 @@ keys. A different number means the prune range and the checkpoint disagree.
 communication; direction is unknown on this hardware. Legacy ran it at 48 threads while our TP2
 optimum is 32, so it needs its own thread sweep rather than inheriting 32.
 
+## Prompt corpus: synthetic vs InfiniteBench
+
+`PROMPT_SOURCE` picks where bench/generate prompts come from.
+
+- **`synthetic`** (default) repeats a pangram seed until it hits `LIN_TOKENS`. Exact and free,
+  and fine for memory/latency sweeps where prompt *content* cannot affect the result.
+- **`infinitebench`** truncates a real long document to exactly `LIN_TOKENS`. Required for
+  anything content-dependent — above all MoE expert routing.
+
+Why it matters: with the repeated seed, the same handful of experts fire for every token, so any
+routing or EP load-balance number is an artifact of the prompt rather than a property of the model.
+
+Chat corpora are the wrong shape at long context. ShareGPT averages ~80 input tokens, so a 120k
+prompt would be ~1500 unrelated conversations stapled together — a manufactured semantic transition
+every ~80 tokens. LMSYS-Chat-1M is longer but still chat-scale, and is HF-gated. InfiniteBench
+records are single coherent documents already past 100k tokens, so a long prompt is one real
+document truncated. It is ungated.
+
+Fetch once from a login node (~333 MB, stored outside the repo):
+
+```bash
+bash scripts/fetch_infinitebench.sh
+```
+
+Four natural-language tasks are vendored. The synthetic InfiniteBench tasks (`math_find`,
+`passkey`, `kv_retrieval`, `number_string`) are deliberately excluded — `math_find`'s context is a
+bare list of integers, about as degenerate for routing as the pangram this replaces.
+
+| Task | Domain | chars/token | Longest record |
+|---|---|---:|---:|
+| `longbook_sum_eng` | literary prose | 4.71 | ~673k tokens |
+| `code_debug` | Python source | 4.13 | ~205k tokens |
+| `longdialogue_qa_eng` | screenplay | 3.78 | ~131k tokens |
+| `longbook_qa_eng` | prose + QA | 4.27 | ~743k tokens |
+
+### Homogeneous vs heterogeneous batches
+
+`PROMPT_TASK` selects between the two operating points worth comparing:
+
+| | `PROMPT_TASK` | Models | Expected routing |
+|---|---|---|---|
+| **Homogeneous** | one task, e.g. `code_debug` | a specialised service | **worst** skew — all slots share hot experts |
+| **Heterogeneous** | `""` | general serving | skew partly averages across domains |
+
+Selection round-robins across task files first, so slot *i* differs by **domain** before any task
+repeats; with a task pinned, slots rotate through distinct records of that one domain. Either way
+`PROMPT_SEED` fixes the draw, so repeat runs are identical and separate seeds give independent
+samples for error bars.
+
+The difference between the two is itself the result — batch composition as a lever on EP load
+imbalance — so run both rather than picking one.
+
+**Batching is not yet enabled**: `build_synthetic_cases` still raises for `BATCH_SIZE != 1`. The
+slot machinery above exists and is tested, but only slot 0 is reachable until plan item 6 lands.
+
+**`LIN_TOKENS=120000` is not runnable yet** either: unchunked prefill OOMs at ~22-23k
+(`Lin=20480` passes at 891.8 GiB). Long-context cases are gated on chunked prefill, plan item 8.
+
 ## Config model
 
 - `scripts/configs/_baseline.env` defines the defaults for every field. `REAL_RUN=1` is the default; submissions go through the real distributed path.

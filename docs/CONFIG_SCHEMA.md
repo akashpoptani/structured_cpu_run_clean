@@ -121,7 +121,37 @@ Implemented in `src/overrides/indexer_broadcast.py` as a shim bound onto `model.
 legitimately hold different tokens and the assert would fail — at which point this field should be
 removed and the shim made unconditional.
 
-## 10. REAL_RUN gate and sharded checkpoint path
+## 10. Prompt source
+
+`PROMPT_SOURCE` selects how bench/generate prompts are built. Verify mode is unaffected — it reads
+reference cases, never synthesises a prompt.
+
+- `synthetic` (default): repeat a pangram seed to exactly `LIN_TOKENS`.
+- `infinitebench`: truncate one real InfiniteBench document to exactly `LIN_TOKENS`.
+
+| Field | Default | Meaning |
+|---|---|---|
+| `PROMPT_SOURCE` | `synthetic` | `synthetic` \| `infinitebench` |
+| `PROMPT_CORPUS_PATH` | scratch corpus dir | directory of `<task>.jsonl`; must exist when the corpus is selected |
+| `PROMPT_SEED` | `0` | fixes which records are drawn; same seed gives identical prompts |
+| `PROMPT_TASK` | `""` | pin one domain, or `""` to round-robin across all of them |
+
+Valid `PROMPT_TASK` values: `longbook_sum_eng`, `code_debug`, `longdialogue_qa_eng`,
+`longbook_qa_eng`. Pinning gives a **homogeneous** batch (one domain, distinct records per slot);
+empty gives a **heterogeneous** batch (slot *i* round-robins across domains).
+
+The parser rejects `PROMPT_SOURCE=infinitebench` when `PROMPT_CORPUS_PATH` is empty or missing,
+so a bad path fails at parse time rather than after a multi-minute weight load. Fetch the corpus
+with `bash scripts/fetch_infinitebench.sh` from a login node.
+
+`LIN_TOKENS` above the model's context length (131072) is rejected for both sources.
+
+Implementation: `src/clean_inference/corpus.py`; wired at the single branch in
+`build_synthetic_cases` (`src/clean_inference/prompting.py`), so the case-dict shape is identical
+for both sources — only `source` differs, gaining `task` / `record_index` / `context_tokens`
+provenance.
+
+## 11. REAL_RUN gate and sharded checkpoint path
 
 `REAL_RUN` is `1` by default in the baseline now. `submit_experiment.sh` always generates a real distributed sbatch that calls `scripts/run_native_distributed.sh`; the mock `run_case.sh` placeholder is no longer reachable through the main launcher. `REAL_RUN` stays plumbed through the schema so future tooling (e.g. a richer dry-run mode) can still distinguish.
 
@@ -138,7 +168,7 @@ Cache compatibility is checked on read against **model identity + TP topology on
 
 **`SBATCH_CPUS_PER_TASK`, `OMP_NUM_THREADS`, partition, account, node names, and SLURM job id are intentionally NOT part of cache compatibility.** The same TP2 cache is readable under `c=1` or `c=96`; only performance changes. If `TP_SIZE` / `world_size` changes, use a different `DEQUANT_CACHE_PATH` — the shards are world-size-specific by construction. Memory must remain high (≥800 GB / rank) regardless of cores, because the BF16 cached state is ~676 GB / rank.
 
-## 11. Native ModelArgs config
+## 12. Native ModelArgs config
 
 `MODEL_ARGS_CONFIG_PATH` points at the native DeepSeek ModelArgs JSON consumed directly by `../DeepSeek-V3.2/inference/model.py`. Default: `../DeepSeek-V3.2/inference/config_671B_v3.2.json`.
 
@@ -147,7 +177,7 @@ Cache compatibility is checked on read against **model identity + TP topology on
 - `MODEL_ARGS_CONFIG_PATH` is *not* the HF-style `<ACTIVE_MODEL_PATH>/config.json`. The HF file is checkpoint metadata only and is not used by the native ModelArgs path.
 - `dtype`, `max_batch_size`, and `max_seq_len` must come from runtime/experiment configuration (resolved env + CLI), not from this JSON. `max_seq_len` in particular is a runtime KV/RoPE allocation limit and must not be auto-mapped from any checkpoint `max_position_embeddings` value.
 
-## 12. Precision Scope
+## 13. Precision Scope
 
 `WEIGHTS_PRECISION` and `KV_CACHE_DTYPE` are separate concepts.
 

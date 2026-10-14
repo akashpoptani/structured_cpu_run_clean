@@ -563,7 +563,7 @@ def run(
                 "lin_tokens": lin_tokens,
                 "lout_tokens": lout_tokens,
                 "batch_size": batch_size,
-                "prompt_source": "synthetic_exact_prompt",
+                "prompt_source": (config.get("PROMPT_SOURCE") or "synthetic"),
             }
         result["skipped"] = ["weight_load", "tokenization", "generation"]
         _write_result(config, result, is_root, RUN_MODE_RESULT_FILENAME[run_mode])
@@ -637,13 +637,25 @@ def run(
             lout_tokens=lout_tokens,
             batch_size=batch_size,
             tag_or_label=config["TAG"],
+            config=config,
         )
         for sc in synthetic_cases:
             actual = encode_len(tokenizer, sc["prompt_text"])
+            src = sc["source"]
+            # Provenance differs by PROMPT_SOURCE: the synthetic path carries
+            # seed_text, the corpus path carries task/record_index. Never index
+            # either key directly -- that is what broke job 27841357.
+            if "seed_text" in src:
+                origin = f"seed={src['seed_text']!r}"
+            else:
+                origin = (
+                    f"corpus={src.get('source', '?')}:{src.get('task', '?')}"
+                    f"[{src.get('record_index', '?')}] seed={src.get('seed', '?')}"
+                )
             log(
                 f"[native-run]   synth {sc['case_id']}: "
                 f"lin_target={lin_tokens} lin_actual={actual} lout={sc['lout_tokens']} "
-                f"seed={sc['source']['seed_text']!r}"
+                f"{origin}"
             )
 
     shared: Dict[str, Any] = {

@@ -162,6 +162,7 @@ required_fields=(
   KV_CACHE_DTYPE
   OMP_NUM_THREADS
   SKIP_INDEXER_BROADCAST
+  PROMPT_SOURCE
   MEM_PROFILE
   TIME_PROFILE
   PROFILE_GRANULARITY
@@ -178,6 +179,7 @@ require_one_of KV_CACHE_DTYPE "$KV_CACHE_DTYPE" fp8 bf16
 require_one_of PROFILE_GRANULARITY "$PROFILE_GRANULARITY" off coarse detailed
 require_one_of SESSION_MODE "$SESSION_MODE" 0 1
 require_one_of SKIP_INDEXER_BROADCAST "$SKIP_INDEXER_BROADCAST" 0 1
+require_one_of PROMPT_SOURCE "$PROMPT_SOURCE" synthetic infinitebench
 require_one_of MEM_PROFILE "$MEM_PROFILE" 0 1
 require_one_of TIME_PROFILE "$TIME_PROFILE" 0 1
 require_one_of REAL_RUN "$REAL_RUN" 0 1
@@ -200,6 +202,15 @@ fi
 #
 # NOTE: the tp2 configs declaring EP_SIZE=1 are mislabelled -- they really run
 # 128 experts/rank. Left alone for now; correcting them touches ~20 files.
+if [[ "$PROMPT_SOURCE" == "infinitebench" ]]; then
+  if [[ -z "$PROMPT_CORPUS_PATH" ]]; then
+    die "PROMPT_SOURCE=infinitebench requires PROMPT_CORPUS_PATH"
+  fi
+  if [[ ! -d "$PROMPT_CORPUS_PATH" ]]; then
+    die "PROMPT_CORPUS_PATH does not exist: $PROMPT_CORPUS_PATH (run scripts/fetch_infinitebench.sh from a login node)"
+  fi
+fi
+
 if [[ "$SHARDING_MODE" == "dp2_epon" && "$EP_SIZE" != "$DP_SIZE" ]]; then
   die "SHARDING_MODE=dp2_epon requires EP_SIZE == DP_SIZE (world_size); got EP_SIZE=$EP_SIZE DP_SIZE=$DP_SIZE"
 fi
@@ -251,6 +262,10 @@ if [[ "$FORMAT" == "env" ]]; then
     OMP_PROC_BIND
     OMP_PLACES
     SKIP_INDEXER_BROADCAST
+    PROMPT_SOURCE
+    PROMPT_CORPUS_PATH
+    PROMPT_SEED
+    PROMPT_TASK
     DEQUANT_FP8_WEIGHTS
     MEM_PROFILE
     TIME_PROFILE
@@ -295,6 +310,8 @@ TIME_PROFILE: $TIME_PROFILE
 PROFILE_GRANULARITY: $PROFILE_GRANULARITY
 SESSION_MODE: $SESSION_MODE
 SKIP_INDEXER_BROADCAST: $SKIP_INDEXER_BROADCAST
+PROMPT_SOURCE: $PROMPT_SOURCE
+PROMPT_CORPUS_PATH: $PROMPT_CORPUS_PATH
 GPU_REFERENCE_PATH: $GPU_REFERENCE_PATH
 OUTPUT_ROOT: $OUTPUT_ROOT
 EOF
