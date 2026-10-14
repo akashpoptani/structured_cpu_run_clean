@@ -36,7 +36,9 @@ from src.clean_inference.native_runtime import (
     build_modelargs_for_case,
     construct_transformer,
     detect_distributed_env,
-    initialize_distributed_if_needed,
+    initialize_distributed_before_construction,
+    initialize_distributed_after_construction,
+    assert_distributed_ready,
     setup_thread_env,
 )
 from src.clean_inference.weight_loading import (
@@ -111,7 +113,16 @@ def main() -> int:
     envelope = {"lin_tokens": lin, "lout_tokens": lout, "batch_size": bs}
 
     setup_thread_env(base_config, log_fn=log)
-    initialize_distributed_if_needed(base_config, dist_env, log_fn=log)
+    # Two hooks, same ordering as native_run.py. Both are mode-aware and no-op
+    # for the wrong mode, so no branch is needed here:
+    #   tp2      -> init BEFORE construction, so upstream Column/RowParallelLinear
+    #               and MoE see the real world_size and shard themselves
+    #   dp2_epon -> init AFTER, so construction sees world_size==1 and builds every
+    #               layer full size; install_ep_moe prunes experts afterwards
+    # This replaces initialize_distributed_if_needed(), which e970bbd split into
+    # the pair without updating this file -- leaving the session path dead at
+    # import since that commit.
+    initialize_distributed_before_construction(base_config, dist_env, log_fn=log)
 
     bundle = import_deepseek_modules(base_config)
     model_module = bundle["model"]
@@ -136,6 +147,8 @@ def main() -> int:
         log(f"[session]   {k} = {summary[k]}")
 
     transformer = construct_transformer(model_module, margs, log_fn=log)
+    initialize_distributed_after_construction(base_config, dist_env, log_fn=log)
+    assert_distributed_ready(dist_env, log_fn=log)
     try:
         total_params = sum(p.numel() for p in transformer.parameters())
         log(f"[session] total parameters (numel sum): {total_params:,}")
