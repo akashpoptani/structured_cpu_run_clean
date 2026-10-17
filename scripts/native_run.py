@@ -195,46 +195,67 @@ def _first_mismatch(expected: List[int], generated: List[int]) -> int:
     return -1
 
 
-def _decode_one_case(transformer, tokenizer, case: Dict[str, Any], log_fn) -> Dict[str, Any]:
-    """Tokenize + greedy decode a single case. Mode-agnostic.
+def _decode_case_group(transformer, tokenizer, cases: List[Dict[str, Any]], log_fn) -> List[Dict[str, Any]]:
+    """Tokenize + greedy decode `cases` TOGETHER as one batch of B=len(cases).
 
-    Carries the reference's expected_output_token_ids through (when present)
-    for diagnostics regardless of mode.
+    One forward per step covers every row, which is the point: it is what makes
+    a batch-scaling curve meaningful and what exposes MoE experts to several
+    sequences at once. Decoding the cases in a loop instead would measure B
+    independent runs.
+
+    All rows must share a prompt length and a `lout_tokens`; both prompt sources
+    are exact-length by construction, so this holds, and greedy_decode asserts
+    the first. Timing is per batch, so each row's result carries the SAME
+    prefill/decode seconds -- divide by B for a per-sequence figure.
     """
-    case_id = case["case_id"]
-    prompt_text = case["prompt_text"]
-    prompt_tokens = encode_prompt(tokenizer, prompt_text)
-    log_fn(f"[case {case_id}] prompt: {prompt_text[:120]!r}{'...' if len(prompt_text) > 120 else ''}")
-    log_fn(f"[case {case_id}] prompt token count: {len(prompt_tokens)}")
+    prompt_tokens = [encode_prompt(tokenizer, c["prompt_text"]) for c in cases]
+    B = len(cases)
+    for c, toks in zip(cases, prompt_tokens):
+        text = c["prompt_text"]
+        log_fn(f"[case {c['case_id']}] prompt: {text[:120]!r}{'...' if len(text) > 120 else ''}")
+        log_fn(f"[case {c['case_id']}] prompt token count: {len(toks)}")
 
-    lout = int(case["lout_tokens"])
-    raw_expected = case.get("expected_output_token_ids") or []
-    expected = list(raw_expected) if raw_expected else []
+    louts = {int(c["lout_tokens"]) for c in cases}
+    if len(louts) != 1:
+        raise ValueError(f"batched cases must share lout_tokens; got {sorted(louts)}")
+    lout = louts.pop()
 
     t0 = time.perf_counter()
-    generated, prefill_s, decode_s = greedy_decode(transformer, prompt_tokens, lout, log_fn=log_fn)
+    generated_rows, prefill_s, decode_s = greedy_decode(
+        transformer, prompt_tokens, lout, log_fn=log_fn
+    )
     elapsed = time.perf_counter() - t0
 
-    log_fn(f"[case {case_id}] generated tokens ({len(generated)}): {generated}")
-    decoded = try_decode(tokenizer, generated)
-    if decoded is not None:
-        log_fn(f"[case {case_id}] decoded text: {decoded!r}")
-
-    return {
-        "case_id": case_id,
-        "prompt_text": prompt_text,
-        "prompt_tokens": prompt_tokens,
-        "prompt_token_count": len(prompt_tokens),
-        "expected_tokens": expected,
-        "reference_expected_tokens_available": bool(expected),
-        "generated_tokens": generated,
-        "decoded_text": decoded,
-        "timing": {
-            "prefill_seconds": prefill_s,
-            "decode_seconds_total": decode_s,
-            "total_seconds": elapsed,
-        },
-    }
+    results: List[Dict[str, Any]] = []
+    for idx, (case, toks, generated) in enumerate(zip(cases, prompt_tokens, generated_rows)):
+        raw_expected = case.get("expected_output_token_ids") or []
+        expected = list(raw_expected) if raw_expected else []
+        log_fn(f"[case {case['case_id']}] generated tokens ({len(generated)}): {generated}")
+        decoded = try_decode(tokenizer, generated)
+        if decoded is not None:
+            log_fn(f"[case {case['case_id']}] decoded text: {decoded!r}")
+        results.append({
+            "case_id": case["case_id"],
+            "batch_index": idx,
+            "batch_size": B,
+            "prompt_source": case.get("source", {}),
+            "prompt_text": case["prompt_text"],
+            "prompt_tokens": toks,
+            "prompt_token_count": len(toks),
+            "expected_tokens": expected,
+            "reference_expected_tokens_available": bool(expected),
+            "generated_tokens": generated,
+            "decoded_text": decoded,
+            "timing": {
+                # batch-level: identical across rows, by construction
+                "prefill_seconds": prefill_s,
+                "decode_seconds_total": decode_s,
+                "total_seconds": elapsed,
+                "batch_size": B,
+                "per_sequence_total_seconds": elapsed / B,
+            },
+        })
+    return results
 
 
 def _score_verify(case_result: Dict[str, Any], log_fn) -> Dict[str, Any]:
@@ -293,11 +314,26 @@ def _aggregate_bench(case_bench: List[Dict[str, Any]]) -> Dict[str, Any]:
 # ---------- per-mode decode + result writing ----------
 
 def _decode_cases(transformer, tokenizer, cases: List[Dict[str, Any]], log_fn) -> List[Dict[str, Any]]:
-    """Greedy-decode each case in `cases`. Returns the per-case result dicts."""
-    results: List[Dict[str, Any]] = []
+    """Decode `cases`, batching together those that share a prompt length.
+
+    Synthetic/corpus cases for one run are all LIN_TOKENS long, so they form a
+    single batch of B=BATCH_SIZE. Reference cases may differ in length, so they
+    are grouped and each group is run as its own batch -- that keeps verify
+    working unchanged while letting bench/generate batch properly.
+    """
+    groups: Dict[Any, List[Dict[str, Any]]] = {}
     for case in cases:
-        log_fn(f"[native-run] >>> running case {case['case_id']} <<<")
-        results.append(_decode_one_case(transformer, tokenizer, case, log_fn))
+        key = (len(encode_prompt(tokenizer, case["prompt_text"])), int(case["lout_tokens"]))
+        groups.setdefault(key, []).append(case)
+
+    results: List[Dict[str, Any]] = []
+    for (plen, lout), group in groups.items():
+        ids = ", ".join(c["case_id"] for c in group)
+        log_fn(
+            f"[native-run] >>> running batch of {len(group)} "
+            f"(Lin={plen} Lout={lout}): {ids} <<<"
+        )
+        results.extend(_decode_case_group(transformer, tokenizer, group, log_fn))
     return results
 
 

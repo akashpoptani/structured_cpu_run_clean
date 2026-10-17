@@ -202,6 +202,22 @@ fi
 #
 # NOTE: the tp2 configs declaring EP_SIZE=1 are mislabelled -- they really run
 # 128 experts/rank. Left alone for now; correcting them touches ~20 files.
+# BF16_CKPT_INDEX silently overrides the FP8 load path and forces ModelArgs.dtype
+# to bf16, so a config declaring WEIGHTS_PRECISION="fp8" alongside it describes a
+# run that never happens. Reject the contradiction rather than resolve it quietly:
+# DPHET/DPHOM read as FP8 runs while actually running BF16 end to end.
+if [[ -n "$BF16_CKPT_INDEX" ]]; then
+  if [[ "$WEIGHTS_PRECISION" != "bf16" ]]; then
+    die "BF16_CKPT_INDEX is set, so weights are BF16; WEIGHTS_PRECISION must be \"bf16\", got: $WEIGHTS_PRECISION"
+  fi
+  if [[ "$DEQUANT_FP8_WEIGHTS" != "none" ]]; then
+    die "BF16_CKPT_INDEX is set, so there is no FP8 weight to dequantize; DEQUANT_FP8_WEIGHTS must be \"none\", got: $DEQUANT_FP8_WEIGHTS"
+  fi
+  if [[ "$DEQUANT_CACHE_MODE" != "off" ]]; then
+    die "BF16_CKPT_INDEX takes precedence over DEQUANT_CACHE_MODE; set DEQUANT_CACHE_MODE=\"off\", got: $DEQUANT_CACHE_MODE"
+  fi
+fi
+
 if [[ "$PROMPT_SOURCE" == "infinitebench" ]]; then
   if [[ -z "$PROMPT_CORPUS_PATH" ]]; then
     die "PROMPT_SOURCE=infinitebench requires PROMPT_CORPUS_PATH"

@@ -116,8 +116,11 @@ def build_synthetic_cases(
     "infinitebench", which draws a real long document per slot (see
     `corpus.py`). Everything else about the case dict is identical either way.
 
-    For BS=1 we use SEEDS[0]. For BS>1 we cycle through SEEDS so different
-    cases get different prompt content. Each case carries the full
+    For BS>1 each slot gets its own prompt: the synthetic path cycles SEEDS,
+    and the corpus path round-robins across InfiniteBench tasks so slot i
+    differs by DOMAIN before any task repeats (see corpus.select_records).
+    Every slot is exactly `lin_tokens` long either way, which is what lets
+    greedy_decode run them as one batch. Each case carries the full
     `prompt_text`, `lin_tokens`, `lout_tokens`, `batch_size`, and a `source`
     dict explaining how the prompt was constructed. `expected_output_token_ids`
     is intentionally absent (None) — verify mode never reads synthetic cases.
@@ -126,11 +129,8 @@ def build_synthetic_cases(
         raise ValueError(f"lin_tokens must be > 0; got {lin_tokens}")
     if lout_tokens <= 0:
         raise ValueError(f"lout_tokens must be > 0; got {lout_tokens}")
-    if batch_size != 1:
-        # Real batching is not yet exercised in the runner; surface clearly.
-        raise NotImplementedError(
-            f"build_synthetic_cases currently supports batch_size=1; got {batch_size}"
-        )
+    if batch_size < 1:
+        raise ValueError(f"batch_size must be >= 1; got {batch_size}")
 
     model_max = getattr(tokenizer, "model_max_length", None)
     if isinstance(model_max, int) and 0 < model_max < lin_tokens:

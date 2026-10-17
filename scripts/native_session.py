@@ -167,10 +167,36 @@ def main() -> int:
         dequant_report = maybe_dequantize_fp8(transformer, base_config, log_fn=log)
         cache_write_report = maybe_write_dequant_cache(transformer, cache_plan, base_config, dist_env, log_fn=log)
 
+    # ----- runtime overrides, exactly as native_run.py installs them -----
+    # These were MISSING here, which made dp2_epon sessions silently wrong:
+    # construction sees world_size==1 so every rank builds all 256 experts, the
+    # per-rank checkpoint supplies only 128 (hence missing=22517 in the load
+    # report), and without install_ep_moe the remaining 128 Expert modules stay
+    # UNINITIALISED and are still summed into the MoE output before all_reduce.
+    # It also pinned RSS at the 750 GiB cap, since the non-local experts are
+    # never freed. Observed in job 27904794.
+    indexer_bcast_report = None
+    if (base_config.get("SKIP_INDEXER_BROADCAST") or "1").strip() == "1":
+        from indexer_broadcast import install_indexer_broadcast_skip  # src/overrides
+
+        indexer_bcast_report = install_indexer_broadcast_skip(model_module, log_fn=log)
+
+    ep_moe_report = None
+    if base_config.get("SHARDING_MODE", "").lower() == "dp2_epon":
+        from ep_moe import install_ep_moe  # resolved via src/overrides on sys.path
+
+        ep_moe_report = install_ep_moe(
+            transformer, model_module, dist_env,
+            n_routed_experts=int(margs.n_routed_experts),
+            ep_size=int(base_config.get("EP_SIZE") or 0), log_fn=log,
+        )
+
     # ----- tokenizer once -----
     tokenizer, tokenizer_dir = load_tokenizer(base_config, log_fn=log)
 
     shared = {
+        "indexer_bcast_report": indexer_bcast_report,
+        "ep_moe_report": ep_moe_report,
         "load_report": load_report,
         "dequant_report": dequant_report,
         "cache_read_report": cache_read_report,
