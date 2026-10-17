@@ -313,7 +313,8 @@ def _aggregate_bench(case_bench: List[Dict[str, Any]]) -> Dict[str, Any]:
 
 # ---------- per-mode decode + result writing ----------
 
-def _decode_cases(transformer, tokenizer, cases: List[Dict[str, Any]], log_fn) -> List[Dict[str, Any]]:
+def _decode_cases(transformer, tokenizer, cases: List[Dict[str, Any]], log_fn,
+                  config: Optional[Dict[str, str]] = None) -> List[Dict[str, Any]]:
     """Decode `cases`, batching together those that share a prompt length.
 
     Synthetic/corpus cases for one run are all LIN_TOKENS long, so they form a
@@ -326,6 +327,7 @@ def _decode_cases(transformer, tokenizer, cases: List[Dict[str, Any]], log_fn) -
         key = (len(encode_prompt(tokenizer, case["prompt_text"])), int(case["lout_tokens"]))
         groups.setdefault(key, []).append(case)
 
+    sharded = (config or {}).get("SHARDING_MODE", "").lower() == "dp2_true"
     results: List[Dict[str, Any]] = []
     for (plen, lout), group in groups.items():
         ids = ", ".join(c["case_id"] for c in group)
@@ -333,8 +335,79 @@ def _decode_cases(transformer, tokenizer, cases: List[Dict[str, Any]], log_fn) -
             f"[native-run] >>> running batch of {len(group)} "
             f"(Lin={plen} Lout={lout}): {ids} <<<"
         )
-        results.extend(_decode_case_group(transformer, tokenizer, group, log_fn))
+        if sharded and len(group) > 1:
+            results.extend(_decode_case_group_sharded(transformer, tokenizer, group, log_fn))
+        else:
+            results.extend(_decode_case_group(transformer, tokenizer, group, log_fn))
     return results
+
+
+def _decode_case_group_sharded(transformer, tokenizer, cases, log_fn):
+    """dp2_true: rank r decodes cases[r::W], then token ids are gathered.
+
+    Each rank attends only over its own sequences and holds only their KV --
+    that is the whole point of the mode. The MoE's all_gather reconstitutes the
+    full batch inside every layer, so routing is unchanged; only attention and
+    the KV buffers are sharded.
+
+    Every rank must make the SAME NUMBER of forward calls with the SAME shapes,
+    or the collectives inside MoE deadlock. Guaranteed here because the parser
+    requires B % DP_SIZE == 0, so every rank gets an equal row count, and lout
+    is uniform across the group.
+
+    Results are gathered at the end rather than written per rank: rank 0 writes
+    the result JSON but only generated its own slice. The payload is tiny
+    (B x lout ints), so a single all_gather of token ids is simpler and cheaper
+    than merging per-rank files.
+    """
+    import torch
+    import torch.distributed as dist
+
+    world = dist.get_world_size()
+    rank = dist.get_rank()
+    local = cases[rank::world]
+    log_fn(
+        f"[true-dp] rank {rank}/{world} decoding {len(local)} of {len(cases)} "
+        f"sequences: {', '.join(c['case_id'] for c in local)}"
+    )
+
+    local_results = _decode_case_group(transformer, tokenizer, local, log_fn)
+
+    # all_gather the generated ids; fixed shape [n_local, lout] on every rank.
+    lout = int(cases[0]["lout_tokens"])
+    mine = torch.tensor([r["generated_tokens"] for r in local_results], dtype=torch.long)
+    bufs = [torch.empty_like(mine) for _ in range(world)]
+    dist.all_gather(bufs, mine.contiguous())
+
+    # rank r held cases[r::world], so local index i is global index r + world*i
+    merged: List[Dict[str, Any]] = [None] * len(cases)  # type: ignore[list-item]
+    for r in range(world):
+        for i in range(bufs[r].shape[0]):
+            g = r + world * i
+            if r == rank:
+                res = dict(local_results[i])
+            else:
+                case = cases[g]
+                toks = encode_prompt(tokenizer, case["prompt_text"])
+                res = {
+                    "case_id": case["case_id"],
+                    "prompt_source": case.get("source", {}),
+                    "prompt_text": case["prompt_text"],
+                    "prompt_tokens": toks,
+                    "prompt_token_count": len(toks),
+                    "expected_tokens": list(case.get("expected_output_token_ids") or []),
+                    "reference_expected_tokens_available": bool(case.get("expected_output_token_ids")),
+                    "timing": dict(local_results[0]["timing"]),
+                    "decoded_by_rank": r,
+                }
+            res["generated_tokens"] = bufs[r][i].tolist()
+            res["decoded_text"] = try_decode(tokenizer, res["generated_tokens"])
+            res["batch_index"] = g
+            res["batch_size"] = len(cases)
+            res["attention_mode"] = "sequence_sharded"
+            merged[g] = res
+    log_fn(f"[true-dp] gathered {len(cases)} sequences' tokens across {world} ranks")
+    return merged
 
 
 def _run_verify_phase(
@@ -344,7 +417,7 @@ def _run_verify_phase(
 ) -> Dict[str, Any]:
     """Decode verify cases, score, write the verify JSON, return summary."""
     overall_start = time.perf_counter()
-    case_results = _decode_cases(transformer, tokenizer, cases, log_fn)
+    case_results = _decode_cases(transformer, tokenizer, cases, log_fn, config=config)
     elapsed = time.perf_counter() - overall_start
 
     passed_count = 0
@@ -387,7 +460,7 @@ def _run_generate_phase(
     config: Dict[str, str], is_root: bool, log_fn, write_filename: str,
 ) -> Dict[str, Any]:
     overall_start = time.perf_counter()
-    case_results = _decode_cases(transformer, tokenizer, cases, log_fn)
+    case_results = _decode_cases(transformer, tokenizer, cases, log_fn, config=config)
     elapsed = time.perf_counter() - overall_start
     log_fn(f"[native-run] generate summary: total={len(case_results)} cases in {elapsed:.2f}s")
     result = dict(base_result)
@@ -407,7 +480,7 @@ def _run_bench_phase(
     config: Dict[str, str], is_root: bool, log_fn, write_filename: str,
 ) -> Dict[str, Any]:
     overall_start = time.perf_counter()
-    case_results = _decode_cases(transformer, tokenizer, cases, log_fn)
+    case_results = _decode_cases(transformer, tokenizer, cases, log_fn, config=config)
     elapsed = time.perf_counter() - overall_start
 
     bench_cases = [_bench_stats_for_case(cr) for cr in case_results]
@@ -626,14 +699,35 @@ def run(
         base_result["indexer_bcast_report"] = indexer_bcast_report
 
     ep_moe_report: Optional[Dict[str, Any]] = None
-    if config.get("SHARDING_MODE", "").lower() == "dp2_epon":
-        from ep_moe import install_ep_moe  # resolved via src/overrides on sys.path
+    sharding_mode = config.get("SHARDING_MODE", "").lower()
+    if sharding_mode in ("dp2_epon", "dp2_true"):
+        # Both modes prune non-local experts identically; they differ only in
+        # which MoE forward gets bound. install_true_dp_moe wraps install_ep_moe
+        # and then decides from batch_size: B=1 keeps the replicated forward
+        # (and logs that the run is NOT measuring true DP), B>1 binds the
+        # all_gather/reduce_scatter one.
+        #
+        # This decision MUST agree with _decode_case_group_sharded, which shards
+        # the batch on the same `len(group) > 1` condition. If one shards and the
+        # other does not, the collectives inside MoE mismatch and the ranks
+        # deadlock. Both key off batch_size; they live in different files.
+        if sharding_mode == "dp2_true":
+            from ep_moe import install_true_dp_moe  # src/overrides
 
-        ep_moe_report = install_ep_moe(
-            transformer, model_module, dist_env,
-            n_routed_experts=int(args.n_routed_experts),
-            ep_size=int(config.get("EP_SIZE") or 0), log_fn=log,
-        )
+            ep_moe_report = install_true_dp_moe(
+                transformer, model_module, dist_env,
+                n_routed_experts=int(args.n_routed_experts),
+                ep_size=int(config.get("EP_SIZE") or 0),
+                batch_size=int(config.get("BATCH_SIZE") or 1), log_fn=log,
+            )
+        else:
+            from ep_moe import install_ep_moe  # src/overrides
+
+            ep_moe_report = install_ep_moe(
+                transformer, model_module, dist_env,
+                n_routed_experts=int(args.n_routed_experts),
+                ep_size=int(config.get("EP_SIZE") or 0), log_fn=log,
+            )
         base_result["ep_moe_report"] = ep_moe_report
 
     if no_generate:

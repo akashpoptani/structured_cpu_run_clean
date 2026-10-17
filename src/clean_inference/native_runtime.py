@@ -90,7 +90,11 @@ def detect_distributed_env() -> Dict[str, Any]:
 
 
 TP_MODES = ("tp2",)
-DP_MODES = ("dp2", "dp2_epon")
+# dp2_true: sequence-sharded attention (PARALLELISM_PLAN_FINAL.md item 7). A DP
+# mode for dist-init purposes -- construction must see world_size==1 so every
+# layer is built full size -- exactly like dp2_epon. The two differ only AFTER
+# construction, in which MoE forward is bound and how much KV is allocated.
+DP_MODES = ("dp2", "dp2_epon", "dp2_true")
 
 
 def _init_gloo(dist_env: Dict[str, Any], when: str, mode: str, log_fn) -> bool:
@@ -170,12 +174,14 @@ def build_modelargs_for_case(
     config: Dict[str, str],
     reference_case: Dict[str, Any],
     max_seq_len_pad: int = 0,
+    log_fn=print,
 ) -> Tuple[Any, Dict[str, Any], Path]:
     """Load native ModelArgs JSON and apply runtime overrides for one case.
 
     Overrides:
       dtype           = WEIGHTS_PRECISION -> ModelArgs literal
-      max_batch_size  = reference_case["batch_size"]
+      max_batch_size  = reference_case["batch_size"], or ceil(B/DP_SIZE)
+                        under dp2_true (see below)
       max_seq_len     = reference_case["lin_tokens"] + reference_case["lout_tokens"]
                         + max_seq_len_pad
 
@@ -201,9 +207,26 @@ def build_modelargs_for_case(
     batch_size = int(reference_case["batch_size"])
     max_seq_len = lin + lout + max_seq_len_pad
 
+    # dp2_true: rank r owns batch[r::world_size], so it only ever attends over
+    # its own sequences and only needs KV for those. THIS LINE is what actually
+    # frees the memory -- upstream sizes every kv_cache/pe_cache buffer from
+    # max_batch_size at construction, so leaving it at the global B would
+    # allocate the full batch's KV on every rank and the sharding would buy
+    # nothing. B=1 is excluded: install_true_dp_moe falls back to replicated
+    # attention there, so every rank still needs the whole (single) sequence.
+    local_batch_size = batch_size
+    sharding_mode = (config.get("SHARDING_MODE") or "").lower()
+    if sharding_mode == "dp2_true" and batch_size > 1:
+        world_size = max(1, int(config.get("DP_SIZE") or 1))
+        local_batch_size = -(-batch_size // world_size)   # ceil
+        log_fn(
+            f"[modelargs] dp2_true: max_batch_size {batch_size} -> {local_batch_size} "
+            f"(B/{world_size}); KV buffers sized for this rank's sequences only"
+        )
+
     overrides = {
         "dtype": dtype_override,
-        "max_batch_size": batch_size,
+        "max_batch_size": local_batch_size,
         "max_seq_len": max_seq_len,
     }
 

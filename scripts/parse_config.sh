@@ -173,7 +173,7 @@ for field in "${required_fields[@]}"; do
 done
 
 require_one_of RUN_MODE "$RUN_MODE" verify bench both generate
-require_one_of SHARDING_MODE "$SHARDING_MODE" tp2 dp2_epon
+require_one_of SHARDING_MODE "$SHARDING_MODE" tp2 dp2_epon dp2_true
 require_one_of WEIGHTS_PRECISION "$WEIGHTS_PRECISION" fp8 bf16
 require_one_of KV_CACHE_DTYPE "$KV_CACHE_DTYPE" fp8 bf16
 require_one_of PROFILE_GRANULARITY "$PROFILE_GRANULARITY" off coarse detailed
@@ -227,8 +227,21 @@ if [[ "$PROMPT_SOURCE" == "infinitebench" ]]; then
   fi
 fi
 
-if [[ "$SHARDING_MODE" == "dp2_epon" && "$EP_SIZE" != "$DP_SIZE" ]]; then
-  die "SHARDING_MODE=dp2_epon requires EP_SIZE == DP_SIZE (world_size); got EP_SIZE=$EP_SIZE DP_SIZE=$DP_SIZE"
+if [[ "$SHARDING_MODE" == "dp2_epon" || "$SHARDING_MODE" == "dp2_true" ]]; then
+  if [[ "$EP_SIZE" != "$DP_SIZE" ]]; then
+    die "SHARDING_MODE=$SHARDING_MODE requires EP_SIZE == DP_SIZE (world_size); got EP_SIZE=$EP_SIZE DP_SIZE=$DP_SIZE"
+  fi
+fi
+
+# dp2_true shards the batch across ranks, and reduce_scatter splits equally, so a
+# batch that does not divide evenly would misalign the slices. B=1 is allowed and
+# falls back to replicated attention (install_true_dp_moe logs this loudly) --
+# the alternative would be overriding upstream Transformer.forward for the
+# zero-rows-on-a-rank case, i.e. copying upstream numerics into this repo.
+if [[ "$SHARDING_MODE" == "dp2_true" && "$BATCH_SIZE" != "1" ]]; then
+  if (( BATCH_SIZE % DP_SIZE != 0 )); then
+    die "SHARDING_MODE=dp2_true requires BATCH_SIZE divisible by DP_SIZE (or BATCH_SIZE=1); got BATCH_SIZE=$BATCH_SIZE DP_SIZE=$DP_SIZE"
+  fi
 fi
 
 if [[ "$FORMAT" == "env" ]]; then

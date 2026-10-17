@@ -182,14 +182,36 @@ def main() -> int:
         indexer_bcast_report = install_indexer_broadcast_skip(model_module, log_fn=log)
 
     ep_moe_report = None
-    if base_config.get("SHARDING_MODE", "").lower() == "dp2_epon":
-        from ep_moe import install_ep_moe  # resolved via src/overrides on sys.path
+    _sharding_mode = base_config.get("SHARDING_MODE", "").lower()
+    if _sharding_mode in ("dp2_epon", "dp2_true"):
+        # See the matching block in native_run.py. One extra hazard here: a
+        # session binds the MoE forward ONCE from base_config, but each child
+        # carries its own BATCH_SIZE. A session mixing B=1 and B>1 children
+        # under dp2_true would bind for one and run the other -- rejected below.
+        if _sharding_mode == "dp2_true":
+            from ep_moe import install_true_dp_moe  # src/overrides
 
-        ep_moe_report = install_ep_moe(
-            transformer, model_module, dist_env,
-            n_routed_experts=int(margs.n_routed_experts),
-            ep_size=int(base_config.get("EP_SIZE") or 0), log_fn=log,
-        )
+            child_bs = {int(c.get("BATCH_SIZE") or 1) for c in children}
+            if len(child_bs) != 1:
+                _fail(
+                    f"dp2_true sessions need one BATCH_SIZE across children "
+                    f"(the MoE forward is bound once, before any child runs); "
+                    f"got {sorted(child_bs)}"
+                )
+            ep_moe_report = install_true_dp_moe(
+                transformer, model_module, dist_env,
+                n_routed_experts=int(margs.n_routed_experts),
+                ep_size=int(base_config.get("EP_SIZE") or 0),
+                batch_size=child_bs.pop(), log_fn=log,
+            )
+        else:
+            from ep_moe import install_ep_moe  # src/overrides
+
+            ep_moe_report = install_ep_moe(
+                transformer, model_module, dist_env,
+                n_routed_experts=int(margs.n_routed_experts),
+                ep_size=int(base_config.get("EP_SIZE") or 0), log_fn=log,
+            )
 
     # ----- tokenizer once -----
     tokenizer, tokenizer_dir = load_tokenizer(base_config, log_fn=log)

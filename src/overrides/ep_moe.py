@@ -86,6 +86,150 @@ def _make_ep_moe_forward(reduce_dtype):
     return _ep_moe_forward
 
 
+def _make_true_dp_moe_forward(reduce_dtype):
+    """MoE forward for TRUE DP, where `x` differs per rank (sequence-sharded).
+
+    `_ep_moe_forward` above assumes every rank holds the SAME `x` -- true only
+    because dp2_epon replicates attention. Under true DP rank r holds only
+    batch[r::world_size], so a token on rank 0 routinely needs an expert that
+    lives on rank 1. Token and expert have to meet somewhere.
+
+    Design (a) from PARALLELISM_PLAN_FINAL.md item 7: gather the TOKENS to every
+    rank, run local experts over all of them, scatter the result back.
+
+        x_all   = all_gather(x_local)     every rank sees the whole batch
+        w, idx  = gate(x_all)             gate is replicated -> identical routing,
+                                          never communicated
+        y_all   = local_experts(x_all)    experts [r*n_local, (r+1)*n_local)
+        reduce_scatter(y_local, y_all)    sum partials, keep only our slice
+        y_local += shared_experts(x_local)
+
+    Design (b) -- all_to_all dispatch, moving only tokens that need a remote
+    expert -- is NOT IMPLEMENTABLE on this backend. scripts/probe_collectives.py
+    on 2 ranks: `RuntimeError: Backend gloo does not support alltoall`. It would
+    need MPI or oneCCL. At world_size=2 it would save little anyway, since with
+    top-8-of-256 roughly half of each token's experts are remote regardless.
+
+    reduce_scatter rather than all_reduce+slice: the same probe confirmed gloo
+    implements reduce_scatter correctly at world_size=2. The plan hedged with
+    all_reduce because it was unverified; reducing straight into the local slice
+    moves B/world_size instead of B and drops the discard.
+
+    Requires every rank to hold the same NUMBER of rows, since reduce_scatter
+    splits equally -- enforced by install_true_dp_moe refusing B % world_size.
+    """
+    import torch
+    import torch.distributed as dist
+
+    def _true_dp_moe_forward(self, x: torch.Tensor) -> torch.Tensor:
+        shape = x.size()
+        x_local = x.view(-1, self.dim)
+        world = dist.get_world_size()
+
+        # (1) gather tokens. Fixed-size: all ranks hold equal rows by construction.
+        gathered = [torch.empty_like(x_local) for _ in range(world)]
+        dist.all_gather(gathered, x_local.contiguous())
+        x_all = torch.cat(gathered, dim=0)
+
+        # (2) routing is derived, never communicated -- the gate is replicated and
+        #     sees identical input, so every rank computes identical indices.
+        weights, indices = self.gate(x_all)
+        y_all = torch.zeros_like(x_all, dtype=torch.float32)
+        counts = torch.bincount(
+            indices.flatten(), minlength=self.n_routed_experts
+        ).tolist()
+
+        # (3) our experts over ALL tokens
+        for i in range(self.ep_start_idx, self.ep_end_idx):
+            if counts[i] == 0:
+                continue
+            idx, top = torch.where(indices == i)
+            y_all[idx] += self.experts[i](x_all[idx]) * weights[idx, top, None]
+
+        # (4) sum partials and keep only our slice, in one collective
+        comm = y_all.to(torch.bfloat16) if reduce_dtype is torch.bfloat16 else y_all
+        y_local = torch.empty_like(x_local, dtype=comm.dtype)
+        dist.reduce_scatter(y_local, list(comm.chunk(world, dim=0)))
+        y_local = y_local.to(torch.float32)
+
+        # (5) shared experts are replicated and depend only on local tokens
+        y_local += self.shared_experts(x_local)
+        return y_local.type_as(x_local).view(shape)
+
+    return _true_dp_moe_forward
+
+
+def install_true_dp_moe(
+    transformer: Any,
+    model_module: Any,
+    dist_env: Dict[str, Any],
+    n_routed_experts: int,
+    ep_size: int,
+    batch_size: int,
+    log_fn=print,
+) -> Dict[str, Any]:
+    """Prune non-local experts and bind the forward appropriate to `batch_size`.
+
+    TWO MODES, chosen once here from B -- never per call:
+
+      B == 1          -> replicated attention + `_ep_moe_forward` (today's
+                         dp2_epon, token-exact validated). With world_size=2 a
+                         sharded batch of 1 would leave a rank with ZERO rows,
+                         and handling that cleanly would mean overriding
+                         upstream `Transformer.forward` -- i.e. copying upstream
+                         numerics into this repo, which this lane avoids.
+      B >= world_size -> sequence-sharded attention + `_true_dp_moe_forward`,
+                         which is where the KV saving and the attention split
+                         actually come from.
+
+    The B=1 fallback is logged loudly because it is a silent-wrong-number trap:
+    a run tagged dp2_true at B=1 is NOT measuring true DP, and the mode is
+    recorded in the returned report so results carry it.
+
+    B must divide world_size evenly: reduce_scatter splits equally, and ragged
+    per-rank row counts would misalign the slices.
+    """
+    world_size = int(dist_env["world_size"])
+    if batch_size != 1 and batch_size % world_size != 0:
+        raise ValueError(
+            f"true DP needs batch_size divisible by world_size "
+            f"(reduce_scatter splits equally); got B={batch_size} world={world_size}"
+        )
+
+    report = install_ep_moe(
+        transformer, model_module, dist_env,
+        n_routed_experts=n_routed_experts, ep_size=ep_size, log_fn=log_fn,
+    )
+
+    if batch_size == 1:
+        report["attention_mode"] = "replicated"
+        report["moe_forward"] = "_ep_moe_forward"
+        log_fn(
+            "[true-dp] B=1: FALLING BACK to replicated attention. This run is "
+            "NOT measuring true DP -- it is dp2_epon. Use B>=2 (a multiple of "
+            f"world_size={world_size}) for sequence-sharded attention."
+        )
+        return report
+
+    ep_forward = _make_true_dp_moe_forward(_reduce_dtype_from_env())
+    bound = 0
+    for layer in transformer.layers:
+        ffn = getattr(layer, "ffn", None)
+        if not isinstance(ffn, model_module.MoE):
+            continue
+        ffn.forward = types.MethodType(ep_forward, ffn)
+        bound += 1
+    report["attention_mode"] = "sequence_sharded"
+    report["moe_forward"] = "_true_dp_moe_forward"
+    report["true_dp_layers"] = bound
+    log_fn(
+        f"[true-dp] sequence-sharded: rebound {bound} MoE layers to the "
+        f"all_gather/reduce_scatter forward; B={batch_size} over {world_size} ranks "
+        f"= {batch_size // world_size} sequences/rank"
+    )
+    return report
+
+
 def install_ep_moe(
     transformer: Any,
     model_module: Any,
