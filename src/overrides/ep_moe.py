@@ -65,11 +65,16 @@ def _make_ep_moe_forward(reduce_dtype):
         ).tolist()
 
         # (A) our EP range, not upstream's TP range
-        for i in range(self.ep_start_idx, self.ep_end_idx):
-            if counts[i] == 0:
-                continue
-            idx, top = torch.where(indices == i)
-            y[idx] += self.experts[i](x_flat[idx]) * weights[idx, top, None]
+        import moe_batched
+        if moe_batched.ENABLED:
+            y = moe_batched.run_experts_sorted(
+                self, x_flat, weights, indices, self.ep_start_idx, self.ep_end_idx)
+        else:
+            for i in range(self.ep_start_idx, self.ep_end_idx):
+                if counts[i] == 0:
+                    continue
+                idx, top = torch.where(indices == i)
+                y[idx] += self.experts[i](x_flat[idx]) * weights[idx, top, None]
 
         # (C) unconditional -- upstream's `if world_size > 1` never fires in DP
         if reduce_dtype is torch.bfloat16:
@@ -140,11 +145,16 @@ def _make_true_dp_moe_forward(reduce_dtype):
         ).tolist()
 
         # (3) our experts over ALL tokens
-        for i in range(self.ep_start_idx, self.ep_end_idx):
-            if counts[i] == 0:
-                continue
-            idx, top = torch.where(indices == i)
-            y_all[idx] += self.experts[i](x_all[idx]) * weights[idx, top, None]
+        import moe_batched
+        if moe_batched.ENABLED:
+            y_all = moe_batched.run_experts_sorted(
+                self, x_all, weights, indices, self.ep_start_idx, self.ep_end_idx)
+        else:
+            for i in range(self.ep_start_idx, self.ep_end_idx):
+                if counts[i] == 0:
+                    continue
+                idx, top = torch.where(indices == i)
+                y_all[idx] += self.experts[i](x_all[idx]) * weights[idx, top, None]
 
         # (4) sum partials and keep only our slice, in one collective
         comm = y_all.to(torch.bfloat16) if reduce_dtype is torch.bfloat16 else y_all
