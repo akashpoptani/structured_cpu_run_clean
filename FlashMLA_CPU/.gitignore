@@ -4,9 +4,23 @@
 *.pt
 bins/
 sparse_bins/
+prefill_bins/
 
 # Compiled benchmarks
 bench_sparse_amx
 bench_sparse_onednn
 bench_dense_amx
 bench_dense_onednn
+prefill_bins_*
+prefill_sparse_bins/
+libflashmla_*.so
+
+# Dense-causal prefill: reference/baseline only, not in the live path. They are
+# per-head MHA, so they need per-head K/V (10.7 GB/layer at 128k) and are
+# O(Lin^2) -- unusable at long context. They produced the oneDNN-vs-AMX
+# crossover at Sq~640 and a golden to check the sparse kernel against; that
+# knowledge is recorded, the code is kept on disk but not tracked.
+bench_prefill_dense_amx.cpp
+bench_prefill_dense_onednn.cpp
+prefill_gen_bins.py
+prefill_dispatch.h

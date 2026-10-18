@@ -45,11 +45,6 @@ bool init_amx() {
     return (0 == status);
 }
 
-bf16 fp32_to_bf16(fp32 val) {
-    uint32_t bits;
-    std::memcpy(&bits, &val, sizeof(bits));
-    return static_cast<bf16>(bits >> 16);
-}
 
 std::vector<char> read_file(const std::string& path) {
     std::ifstream file(path, std::ios::binary | std::ios::ate);
@@ -109,24 +104,37 @@ inline __m512 fast_exp_512(__m512 x) {
 // Input: K[16 tokens][32 dims] (Row Major in memory)
 // Output: 16 Rows, where each row contains 16 pairs of (K[2r], K[2r+1])
 inline void pack_k_chunk_amx(const bf16* k_src, bf16* k_dst, int stride_d) {
-    // Unroll the loops for speed since sizes are fixed (16x32)
-    for (int r = 0; r < 16; r++) {
-        // We pack 16 pairs (32 elements) per row
-        // r corresponds to the AMX row index.
-        // In the B-matrix, Row 'r' holds data for K-dimension indices 2*r and 2*r+1 across all 16 tokens.
-        
-        const bf16* src_row_0 = k_src + (2 * r);      // K dim 2r
-        const bf16* src_row_1 = k_src + (2 * r + 1);  // K dim 2r+1
-        
-        bf16* dst_row = k_dst + (r * 32); // 32 bf16s per AMX row (64 bytes)
-
-        #pragma GCC unroll 16
-        for (int c = 0; c < 16; c++) {
-            // c is the token index
-            // We read from: src + c*stride_d
-            dst_row[2*c]     = src_row_0[c * stride_d];
-            dst_row[2*c + 1] = src_row_1[c * stride_d];
+    // Viewed as 32-bit DWORDS this is just a 16x16 transpose, no bf16 shuffling:
+    //   dst[r][2c], dst[r][2c+1]  ==  src[c*stride + 2r], src[c*stride + 2r+1]
+    //                             ==  dword r of token c.
+    // A 32-dim slice is exactly 64 B = one __m512i, so token c loads in one go and
+    // AMX row r stores in one go. 16 loads + 48 unpacks + 24 lane-shuffles + 16
+    // stores replaces 512 scalar loads + 512 scalar stores; the 16 cache lines
+    // touched are identical, so this is a pure instruction-count win.
+    // Verified element-exact against the previous scalar form at chunk offsets
+    // 0/32/160/544 before being adopted (job 27925178).
+    __m512i a[16], t[16], u[16], v[16];
+    for (int c = 0; c < 16; c++)
+        a[c] = _mm512_loadu_si512((const void*)(k_src + (size_t)c * stride_d));
+    for (int i = 0; i < 8; i++) {                      // 2x2 blocks
+        t[2*i]   = _mm512_unpacklo_epi32(a[2*i], a[2*i+1]);
+        t[2*i+1] = _mm512_unpackhi_epi32(a[2*i], a[2*i+1]);
+    }
+    for (int i = 0; i < 4; i++) {                      // 4x4, within 128-bit lanes
+        u[4*i+0] = _mm512_unpacklo_epi64(t[4*i+0], t[4*i+2]);
+        u[4*i+1] = _mm512_unpackhi_epi64(t[4*i+0], t[4*i+2]);
+        u[4*i+2] = _mm512_unpacklo_epi64(t[4*i+1], t[4*i+3]);
+        u[4*i+3] = _mm512_unpackhi_epi64(t[4*i+1], t[4*i+3]);
+    }
+    for (int g = 0; g < 2; g++)                        // 8x8
+        for (int i = 0; i < 4; i++) {
+            int b = g*8 + i;
+            v[b]   = _mm512_shuffle_i32x4(u[b], u[b+4], 0x88);
+            v[b+4] = _mm512_shuffle_i32x4(u[b], u[b+4], 0xdd);
         }
+    for (int i = 0; i < 8; i++) {                      // 16x16, stored direct
+        _mm512_storeu_si512((void*)(k_dst + (size_t)i     * 32), _mm512_shuffle_i32x4(v[i], v[i+8], 0x88));
+        _mm512_storeu_si512((void*)(k_dst + (size_t)(i+8) * 32), _mm512_shuffle_i32x4(v[i], v[i+8], 0xdd));
     }
 }
 
@@ -196,6 +204,18 @@ inline AttentionConfig pick_attention_config(
     return {effective, num_chunks, rationale};
 }
 
+// --- STAGE ACCUMULATORS (shared-lib builds) ---
+// In-model the kernel runs 61x per token, so the per-call profiling block would
+// flood the log and tell you nothing. Accumulate instead and let Python read it
+// out: this is what isolates gather cost from TPOT at any batch size.
+//   0 gather  1 kpack  2 qkt  3 softmax  4 vpack  5 amxv  6 barrier  7 reduce
+//   8 total   9 call count
+static double g_acc[10] = {0};
+extern "C" void flashmla_reset_timings(void) { for (int i = 0; i < 10; i++) g_acc[i] = 0; }
+extern "C" void flashmla_get_timings(double* out, int n) {
+    for (int i = 0; i < n && i < 10; i++) out[i] = g_acc[i];
+}
+
 void dense_attention_amx_flat_timers7(
     const bf16* Q, 
     const bf16* KV_flat, 
@@ -225,10 +245,12 @@ void dense_attention_amx_flat_timers7(
 
     static thread_local int print_once = 0;
     if (!print_once) {
+#ifndef FLASHMLA_SHARED_LIB
         printf("[dispatcher] B=%d H_GROUPS=%d num_blocks=%d max_threads=%d -> "
                "effective_threads=%d num_chunks=%d (%s)\n",
                B, H_GROUPS, num_blocks_for_dispatch, max_threads,
                cfg.effective_threads, NUM_CHUNKS, cfg.rationale);
+#endif
         print_once = 1;
     }
 
@@ -306,21 +328,36 @@ void dense_attention_amx_flat_timers7(
                         }
                         t_kpack[tid] += (omp_get_wtime() - t0);
 
-                        // ⏱️ 2. Q * K^T (AMX) — serial sub-chunks for L1 fit
-                        // Per sub-chunk working set: K(18KB) + Q(18KB) = 36KB ≤ L1(48KB).
-                        // Q stays L1-hot across sub-chunks 1-3. RAW dep on tile 0 is fine
-                        // (per amx_compute_only: 1-per-16-cyc throughput regardless of dep).
+                        // ⏱️ 2. Q * K^T (AMX) — all 4 sub-chunks carried at once.
+                        // Two changes vs the previous one-sub-chunk-at-a-time form:
+                        //   (a) 4 independent accumulators instead of 18 MACs chained into
+                        //       tile 0, and (b) Q loaded once per k-step instead of 4x, so
+                        //       load:MAC drops 2:1 -> 5:4. 5:4 is the floor here: M=16 is a
+                        //       single tile row, so every K tile feeds exactly one MAC and
+                        //       has no reuse to exploit.
+                        // Measured: 24 -> 19 us on the stage timer, -10.5 us E2E (t=3.43,
+                        // job 27925223). That is 1.26x, NOT the ~3.25x a naive latency model
+                        // predicts from tdpbf16ps's ~52-cycle latency vs 16-cycle throughput.
+                        // The hardware evidently absorbs most of the RAW dependency on its
+                        // own -- the older note here claiming "1-per-16-cyc regardless of
+                        // dep" was substantially right. Most of what (a)+(b) returned is
+                        // likely (b). Do not expect accumulator depth alone to pay elsewhere.
+                        // NB the stage timer prints 2 decimals in ms, i.e. 10 us resolution
+                        // on a 19 us quantity; only E2E resolves changes of this size.
                         double t1 = omp_get_wtime();
                         alignas(64) float scores[16][64];
-                        for (int sub = 0; sub < 64; sub += 16) {
-                            _tile_zero(0);
-                            for (int k = 0; k < 576; k += 32) {
-                                _tile_loadd(4, q_ptr_base + k, 1152);
-                                _tile_loadd(5, &k_pack[sub * 576 + k * 16], 64);
-                                _tile_dpbf16ps(0, 4, 5);
-                            }
-                            _tile_stored(0, &scores[0][sub], 256);
+                        _tile_zero(0); _tile_zero(1); _tile_zero(2); _tile_zero(3);
+                        for (int k = 0; k < 576; k += 32) {
+                            _tile_loadd(4, q_ptr_base + k, 1152);          // Q: once per k
+                            _tile_loadd(5, &k_pack[ 0 * 576 + k * 16], 64); _tile_dpbf16ps(0, 4, 5);
+                            _tile_loadd(6, &k_pack[16 * 576 + k * 16], 64); _tile_dpbf16ps(1, 4, 6);
+                            _tile_loadd(7, &k_pack[32 * 576 + k * 16], 64); _tile_dpbf16ps(2, 4, 7);
+                            _tile_loadd(5, &k_pack[48 * 576 + k * 16], 64); _tile_dpbf16ps(3, 4, 5);
                         }
+                        _tile_stored(0, &scores[0][ 0], 256);
+                        _tile_stored(1, &scores[0][16], 256);
+                        _tile_stored(2, &scores[0][32], 256);
+                        _tile_stored(3, &scores[0][48], 256);
                         t_qkt[tid] += (omp_get_wtime() - t1);
 
                         // // ⏱️ 3. SOFTMAX + CAST
@@ -372,12 +409,17 @@ void dense_attention_amx_flat_timers7(
                                 bf16* dst = &v_pack[(d_blk / 16) * 1024 + (t_blk / 32) * 512];
                                 for (int r = 0; r < 16; r++) {
                                     int tok = t_blk + r * 2;
-                                    for (int c = 0; c < 16; c++) {
-                                        bf16 val0 = (tok < valid_tokens) ? kv_block_ptr[tok * D + d_blk + c] : 0;
-                                        bf16 val1 = (tok + 1 < valid_tokens) ? kv_block_ptr[(tok + 1) * D + d_blk + c] : 0;
-                                        dst[r * 32 + c * 2 + 0] = val0;
-                                        dst[r * 32 + c * 2 + 1] = val1;
-                                    }
+                                    // VNNI row r = interleave(V[tok][d_blk..+16], V[tok+1][d_blk..+16]).
+                                    // Both sources are 16 CONTIGUOUS bf16, so widening each to 32-bit
+                                    // lanes and OR-ing the second in shifted by 16 lays the pair down
+                                    // exactly: dword c = (val1[c] << 16) | val0[c]  ==  {dst[2c], dst[2c+1]}.
+                                    // 4 ops replace 32 scalar load/store pairs.
+                                    const bf16* s0 = kv_block_ptr + (size_t)tok * D + d_blk;
+                                    __m256i a = (tok     < valid_tokens) ? _mm256_loadu_si256((const __m256i*)s0)     : _mm256_setzero_si256();
+                                    __m256i b = (tok + 1 < valid_tokens) ? _mm256_loadu_si256((const __m256i*)(s0+D)) : _mm256_setzero_si256();
+                                    __m512i lo = _mm512_cvtepu16_epi32(a);
+                                    __m512i hi = _mm512_slli_epi32(_mm512_cvtepu16_epi32(b), 16);
+                                    _mm512_storeu_si512((void*)(dst + r * 32), _mm512_or_si512(lo, hi));
                                 }
                             }
                         }
@@ -518,6 +560,11 @@ void dense_attention_amx_flat_timers7(
         }
     }
 
+    g_acc[1] += max_kpack; g_acc[2] += max_qkt;   g_acc[3] += max_soft;
+    g_acc[4] += max_vpack; g_acc[5] += max_amxv;  g_acc[6] += max_bar;
+    g_acc[7] += max_red;   g_acc[8] += max_map;   g_acc[9] += 1.0;
+
+#ifndef FLASHMLA_SHARED_LIB
     if (active_threads > 0) {
         printf("\n========= FULL AMX PIPELINE PROFILING ========\n");
         printf("COMPONENT              | MAX (CRITICAL) TIME\n");
@@ -533,6 +580,7 @@ void dense_attention_amx_flat_timers7(
         printf("Phase 2 (Reduce)       |      -       | %8.2f ms\n", max_red*1000.0);
         printf("=======================================================\n\n");
     }
+#endif
 }
 
 void sparse_attention_amx(
@@ -592,6 +640,67 @@ void sparse_attention_amx(
     );
 }
 
+// ============================================================================
+// C ABI for the model (src/overrides/flash_attn_cpu.py) -- DECODE path.
+// ============================================================================
+// Upstream decode scores the ENTIRE cache and then masks:
+//     scores = einsum("bshc,btc->bsht", q_nope, kv_cache[:bsz,:end_pos])
+//     scores += index_mask            # keeps topk, discards the rest
+// At end_pos=131072 that computes 131072 scores per head to keep 2048 -- a 64x
+// waste, every token, every layer. This entry point gathers the topk rows first
+// and runs the optimized kernel over just those, so the work is O(topk) instead
+// of O(end_pos).
+//
+// M is 16 HEADS here, not 16 queries: at seqlen=1 a query-major tile would hold
+// one real row and waste 15/16 of every AMX tile (measured 2213 ms/token vs
+// 1209 on torch). Heads fill the tile exactly.
+//
+// block_size and n_threads are caller-tunable; 0 means "use the built-in
+// dispatcher", which picks from (cores, B, H_GROUPS, num_blocks).
+extern "C" int flashmla_decode_sparse(
+    const uint16_t* Q,        // [B][H][576]  absorbed q_nope(512) ++ q_pe(64)
+    const uint16_t* KV,       // [B][Skv][512] kv_cache
+    const uint16_t* PE,       // [B][Skv][64]  pe_cache
+    const int32_t*  topk,     // [B][K]
+    uint16_t*       Out,      // [B][H][512]
+    int B, int H, int Skv, int K, float scale,
+    int block_size, int n_threads) {
+    static bool amx_ok = init_amx();
+    if (!amx_ok) return -1;
+    if (block_size <= 0) block_size = 64;
+    const int D = 576, KPAD = ((K + block_size - 1) / block_size) * block_size;
+
+    static thread_local std::vector<bf16> scratch;
+    static std::vector<bf16> gathered;
+    if (gathered.size() < (size_t)B * KPAD * D) gathered.assign((size_t)B * KPAD * D, 0);
+
+    if (n_threads > 0) {
+        char buf[32]; snprintf(buf, sizeof buf, "%d", n_threads);
+        setenv("FORCE_EFFECTIVE_THREADS", buf, 1);
+    }
+
+    // gather topk rows, concatenating kv_cache(512) and pe_cache(64) as we go
+    double t_gather = omp_get_wtime();
+    #pragma omp parallel for collapse(2) schedule(static)
+    for (int b = 0; b < B; b++)
+        for (int i = 0; i < K; i++) {
+            int t = topk[(size_t)b * K + i];
+            if (t < 0 || t >= Skv) t = 0;
+            bf16* dst = &gathered[((size_t)b * KPAD + i) * D];
+            memcpy(dst,       KV + ((size_t)b * Skv + t) * 512, 512 * sizeof(bf16));
+            memcpy(dst + 512, PE + ((size_t)b * Skv + t) *  64,  64 * sizeof(bf16));
+        }
+
+    g_acc[0] += omp_get_wtime() - t_gather;
+
+    std::vector<int32_t> lens(B, K);
+    dense_attention_amx_flat_timers7((const bf16*)Q, gathered.data(), lens.data(),
+                                     (bf16*)Out, B, H, D, block_size, scale,
+                                     (size_t)KPAD);
+    return 0;
+}
+
+#ifndef FLASHMLA_SHARED_LIB
 int main() {
     init_fp8_lut(); 
     
@@ -674,3 +783,4 @@ int main() {
 
     return 0;
 }
+#endif  // FLASHMLA_SHARED_LIB

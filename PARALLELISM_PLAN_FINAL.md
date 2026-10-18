@@ -102,7 +102,7 @@ Before item 8 (which prototypes inside it), bring the kernel work in-tree as
 |---|---|---|
 | `bench_sparse_amx.cpp` | sparse | custom AMX intrinsics |
 | `bench_sparse_onednn.cpp` | sparse | OneDNN |
-| `bench_dense_amx.cpp` | dense | custom AMX intrinsics |
+| ~~`bench_dense_amx.cpp`~~ | dense | **REMOVED** -- oneDNN wins dense at every thread count (5.89 vs 13.6 ms at 72) |
 | `bench_dense_onednn.cpp` | dense | OneDNN |
 
 Plus a `README.md` carrying every measured number (see that file). Drop the 15 exploratory

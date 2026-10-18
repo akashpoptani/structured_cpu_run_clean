@@ -8,7 +8,6 @@ optimisation log they are drawn from is [FlashMLAOptimisationsAndCheck.md](Flash
 |---|---|---|---|
 | `bench_sparse_amx.cpp` | sparse | custom AMX intrinsics | `bench_sparse_amx.cpp` |
 | `bench_sparse_onednn.cpp` | sparse | OneDNN | `bench_sparse_onednn_correctway.cpp` |
-| `bench_dense_amx.cpp` | dense | custom AMX intrinsics | `bench_dense_amx.cpp` |
 | `bench_dense_onednn.cpp` | dense | OneDNN | `bench_dense_onednn_correctway.cpp` |
 
 The 15 exploratory `bench_sparse_amx_v*.cpp` variants are **not** vendored; the optimisation ladder
@@ -48,7 +47,6 @@ which does not know `tileloadd` / `tdpbf16ps` / `tilestored`. Both must be upgra
 module load gcc/13.2.0 binutils/2.45
 
 g++ -O3 -fopenmp -march=sapphirerapids bench_sparse_amx.cpp -o bench_sparse_amx -lstdc++
-g++ -O3 -fopenmp -march=sapphirerapids bench_dense_amx.cpp  -o bench_dense_amx  -lstdc++
 ```
 
 `-march=sapphirerapids` is used instead of listing ISA flags by hand: the explicit list in the
@@ -77,7 +75,7 @@ cwd-relative; none of the four parses `argv`.
 
 | Binary | Reads |
 |---|---|
-| `bench_dense_amx`, `bench_dense_onednn` | `bins/{config,q,k_cache,block_table,seqlens,out_golden}.bin` |
+| `bench_dense_onednn` | `bins/{config,q,k_cache,block_table,seqlens,out_golden}.bin` |
 | `bench_sparse_amx`, `bench_sparse_onednn` | `sparse_bins/{config,q,k_cache,indices,out_golden}.bin` |
 
 `config.bin` is 20 bytes, `struct.pack("iiiif", ...)`:

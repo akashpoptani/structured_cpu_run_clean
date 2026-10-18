@@ -20,11 +20,6 @@ fp32 bf16_to_fp32(bf16 val) {
     return res;
 }
 
-bf16 fp32_to_bf16(fp32 val) {
-    uint32_t bits;
-    std::memcpy(&bits, &val, sizeof(bits));
-    return static_cast<bf16>(bits >> 16);
-}
 
 std::vector<char> read_file(const std::string& path) {
     std::ifstream file(path, std::ios::binary | std::ios::ate);
@@ -141,8 +136,7 @@ void sparse_attention_onednn(
 ) {
     // --- Initialize Thread-Local Timers for Inner Loop ---
     int max_threads = omp_get_max_threads();
-    std::vector<double> t_gather_thread(max_threads, 0.0);
-    std::vector<double> t_dequant_thread(max_threads, 0.0);
+    std::vector<double> t_fused_thread(max_threads, 0.0);   // gather+dequant+RoPE
 
     // --- Initialize oneDNN Timers ---
     double t_qk = 0.0;
@@ -150,11 +144,11 @@ void sparse_attention_onednn(
     double t_softmax = 0.0;
     double t_pv = 0.0;
 
+    int tid = omp_get_thread_num();
+    double t_fused_start = omp_get_wtime();
+
     #pragma omp for schedule(static)
     for (int t = 0; t < active_seq_len; t++) {
-        // ⏱️ TIMER 1A: GATHER
-        double t_g_start = omp_get_wtime();
-        int tid = omp_get_thread_num();
         int physical_token_idx = active_indices[t];
         
         // // 1. PERFECT PREFETCH: Tell the CPU to fetch the NEXT token's payload from DDR5 right now
@@ -166,11 +160,6 @@ void sparse_attention_onednn(
 
         const DeepSeekToken* __restrict src_token = &K_flat_fp8[physical_token_idx];     
         bf16* __restrict dst_token = DenseKV_scratch + (t * D);
-
-        t_gather_thread[tid] += (omp_get_wtime() - t_g_start);
-
-        // ⏱️ TIMER 1B: DEQUANT + RoPE
-        double t_dq_start = omp_get_wtime();
 
         // 2. Vectorized Dequantization 
         for (int g = 0; g < 4; g++) { 
@@ -193,15 +182,13 @@ void sparse_attention_onednn(
         _mm512_storeu_si512((void*)&dst_token[512], rope_0);
         _mm512_storeu_si512((void*)&dst_token[544], rope_1);
 
-        t_dequant_thread[tid] += (omp_get_wtime() - t_dq_start);
     }
+    t_fused_thread[tid] += (omp_get_wtime() - t_fused_start);
 
     // Aggregate maximum time across threads for the OpenMP loop
-    double max_gather = 0.0;
-    double max_dequant = 0.0;
+    double max_fused = 0.0;
     for (int i = 0; i < max_threads; i++) {
-        max_gather = std::max(max_gather, t_gather_thread[i]);
-        max_dequant = std::max(max_dequant, t_dequant_thread[i]);
+        max_fused = std::max(max_fused, t_fused_thread[i]);
     }
 
     // 2. Fire the oneDNN AMX Math on the dense scratchpad
@@ -232,129 +219,17 @@ void sparse_attention_onednn(
 
     // --- Print Results ---
     printf("\n========= AMX ONEDNN PIPELINE PROFILING ========\n");
-    printf("1a. OMP Gather Loop    | %8.4f ms\n", max_gather * 1000.0);
-    printf("1b. OMP Dequant + RoPE | %8.4f ms\n", max_dequant * 1000.0);
+    printf("1. Gather+Dequant+RoPE | %8.4f ms\n", max_fused * 1000.0);
     printf("2. oneDNN Q * K^T      | %8.4f ms\n", t_qk * 1000.0);
     printf("3. oneDNN Scale        | %8.4f ms\n", t_scale * 1000.0);
     printf("4. oneDNN Softmax      | %8.4f ms\n", t_softmax * 1000.0);
     printf("5. oneDNN Scores * V   | %8.4f ms\n", t_pv * 1000.0);
     printf("------------------------------------------------\n");
-    printf("Total Time             | %8.4f ms\n", (max_gather + max_dequant + t_qk + t_scale + t_softmax + t_pv) * 1000.0);
+    printf("Total Time             | %8.4f ms\n", (max_fused + t_qk + t_scale + t_softmax + t_pv) * 1000.0);
     printf("================================================\n\n");
 }
 
 // 🔥 FULLY ENCAPSULATED SPARSE EXECUTION FUNCTION 🔥
-void sparse_attention_onednn_separated_dequant_and_gather(
-    DNNLContextMacro& ctx, 
-    int B, int D, int active_seq_len,
-    const DeepSeekToken* K_flat_fp8, 
-    const int32_t* active_indices, 
-    bf16* DenseKV_scratch // Pre-bound to oneDNN primitives
-) {
-    // --- Initialize Thread-Local Timers for Inner Loop ---
-    int max_threads = omp_get_max_threads();
-    std::vector<double> t_gather_thread(max_threads, 0.0);
-    std::vector<double> t_dequant_thread(max_threads, 0.0);
-
-    // --- Initialize oneDNN Timers ---
-    double t_qk = 0.0;
-    double t_scale = 0.0;
-    double t_softmax = 0.0;
-    double t_pv = 0.0;
-
-    #pragma omp for schedule(static)
-    for (int t = 0; t < active_seq_len; t++) {
-        // ⏱️ TIMER 1A: GATHER
-        double t_g_start = omp_get_wtime();
-        int tid = omp_get_thread_num();
-        int physical_token_idx = active_indices[t];
-        
-        // // 1. PERFECT PREFETCH: Tell the CPU to fetch the NEXT token's payload from DDR5 right now
-        // if (t + 1 < active_seq_len) {
-        //     const char* next_addr = (const char*)&K_flat_fp8[active_indices[t+1]];
-        //     _mm_prefetch(next_addr, _MM_HINT_T0);          // Fetch first 64 bytes
-        //     _mm_prefetch(next_addr + 64, _MM_HINT_T0);     // Fetch next cache line... etc
-        // }
-
-        const DeepSeekToken* __restrict src_token = &K_flat_fp8[physical_token_idx];     
-        bf16* __restrict dst_token = DenseKV_scratch + (t * D);
-
-        t_gather_thread[tid] += (omp_get_wtime() - t_g_start);
-
-        // ⏱️ TIMER 1B: DEQUANT + RoPE
-        double t_dq_start = omp_get_wtime();
-
-        // 2. Vectorized Dequantization 
-        for (int g = 0; g < 4; g++) { 
-            __m512 v_scale = _mm512_set1_ps(src_token->scales[g]); 
-            
-            for (int v = 0; v < 128; v += 16) {
-                __m128i fp8_16 = _mm_loadu_si128((__m128i*)&src_token->quantized_nope[g * 128 + v]);
-                __m512i idx_32 = _mm512_cvtepu8_epi32(fp8_16);
-                __m512 fp32_16 = _mm512_i32gather_ps(idx_32, fp8_e4m3_lut, 4); 
-                fp32_16 = _mm512_mul_ps(fp32_16, v_scale);
-                __m256i bf16_16 = (__m256i)_mm512_cvtneps_pbh(fp32_16);
-                _mm256_storeu_si256((__m256i*)&dst_token[g * 128 + v], bf16_16);
-            }
-        }
-
-        // 3. AVX-512 RoPE Copy (Replaces memcpy)
-        // 128 bytes = exactly two 512-bit registers
-        __m512i rope_0 = _mm512_loadu_si512((const void*)&src_token->rope[0]);
-        __m512i rope_1 = _mm512_loadu_si512((const void*)&src_token->rope[32]);
-        _mm512_storeu_si512((void*)&dst_token[512], rope_0);
-        _mm512_storeu_si512((void*)&dst_token[544], rope_1);
-
-        t_dequant_thread[tid] += (omp_get_wtime() - t_dq_start);
-    }
-
-    // Aggregate maximum time across threads for the OpenMP loop
-    double max_gather = 0.0;
-    double max_dequant = 0.0;
-    for (int i = 0; i < max_threads; i++) {
-        max_gather = std::max(max_gather, t_gather_thread[i]);
-        max_dequant = std::max(max_dequant, t_dequant_thread[i]);
-    }
-
-    // 2. Fire the oneDNN AMX Math on the dense scratchpad
-    for (int b = 0; b < B; ++b) {
-        auto& ops = ctx.batch_ops[b];
-        
-        // ⏱️ TIMER 2: QK MatMul
-        double t0 = omp_get_wtime();
-        ops.qk_p.execute(ctx.strm, ops.qk_args);
-        t_qk += (omp_get_wtime() - t0);
-        
-        // ⏱️ TIMER 3: Scale
-        double t1 = omp_get_wtime();
-        ops.scale_p.execute(ctx.strm, ops.scale_args);
-        t_scale += (omp_get_wtime() - t1);
-        
-        // ⏱️ TIMER 4: Softmax
-        double t2 = omp_get_wtime();
-        ops.softmax_p.execute(ctx.strm, ops.softmax_args);
-        t_softmax += (omp_get_wtime() - t2);
-        
-        // ⏱️ TIMER 5: PV MatMul
-        double t3 = omp_get_wtime();
-        ops.pv_p.execute(ctx.strm, ops.pv_args);
-        t_pv += (omp_get_wtime() - t3);
-    }
-    ctx.strm.wait();
-
-    // --- Print Results ---
-    printf("\n========= AMX ONEDNN PIPELINE PROFILING ========\n");
-    printf("1a. OMP Gather Loop    | %8.4f ms\n", max_gather * 1000.0);
-    printf("1b. OMP Dequant + RoPE | %8.4f ms\n", max_dequant * 1000.0);
-    printf("2. oneDNN Q * K^T      | %8.4f ms\n", t_qk * 1000.0);
-    printf("3. oneDNN Scale        | %8.4f ms\n", t_scale * 1000.0);
-    printf("4. oneDNN Softmax      | %8.4f ms\n", t_softmax * 1000.0);
-    printf("5. oneDNN Scores * V   | %8.4f ms\n", t_pv * 1000.0);
-    printf("------------------------------------------------\n");
-    printf("Total Time             | %8.4f ms\n", (max_gather + max_dequant + t_qk + t_scale + t_softmax + t_pv) * 1000.0);
-    printf("================================================\n\n");
-}
-
 int main() {
     unsetenv("DNNL_MAX_CONCURRENCY");
     init_fp8_lut(); 
