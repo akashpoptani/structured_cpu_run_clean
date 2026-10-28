@@ -81,7 +81,13 @@ def resolve_shard_path(
     sharding_mode = sharding_mode.lower()
     if sharding_mode == "tp2":
         return sharded_ckpt_path / f"model{rank}-mp{world_size}.safetensors"
-    if sharding_mode in ("dp2", "dp2_epon"):
+    if sharding_mode in ("dp2", "dp2_epon", "dp2_true"):
+        # dp2_true loads IDENTICALLY to dp2_epon -- both build full-size per
+        # rank from the unsharded mp1 checkpoint and let install_*_moe prune
+        # non-local experts afterwards. The two modes differ only in which MoE
+        # forward is bound (replicated vs all_gather/reduce_scatter), which is
+        # a post-load decision. Omitting it here made every dp2_true run die
+        # at load with "unsupported SHARDING_MODE for weight loading".
         return sharded_ckpt_path / "model0-mp1.safetensors"
     _fail(f"unsupported SHARDING_MODE for weight loading: {sharding_mode!r}")
     return Path("/dev/null")  # unreachable; satisfies type checker
