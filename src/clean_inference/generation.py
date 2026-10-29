@@ -51,11 +51,30 @@ from typing import List, Sequence, Tuple, Union
 import torch
 
 
+def _stage_summary(dt_ms: float) -> str:
+    """MLA stage times since the last call, as a log suffix; resets them.
+
+    Called after every prefill forward -- including the final slice -- so
+    STAGE_MS never carries prefill time into decode. Empty unless
+    mla_absorbed is installed (PREFILL_CHUNK > 0).
+    """
+    import sys as _sys
+    _cp = _sys.modules.get("mla_absorbed")
+    if _cp is None or not _cp.STAGE_MS:
+        return ""
+    tot = sum(_cp.STAGE_MS.values())
+    parts = " ".join(f"{k}={v:.0f}" for k, v in
+                     sorted(_cp.STAGE_MS.items(), key=lambda kv: -kv[1]))
+    _cp.STAGE_MS.clear()
+    return f"  [{parts} MLA_sum={tot:.0f} other={dt_ms - tot:.0f}]"
+
+
 def greedy_decode(
     transformer,
     prompt_tokens: Union[List[int], Sequence[Sequence[int]]],
     lout_tokens: int,
     log_fn=print,
+    prefill_chunk: int = 0,
 ) -> Tuple[List[List[int]], float, float]:
     """Run greedy decode for exactly `lout_tokens` steps, for a batch of B rows.
 
@@ -110,6 +129,27 @@ def greedy_decode(
     decode_seconds_total = 0.0
     start = time.perf_counter()
 
+    # Chunked prefill. Upstream pushes the whole prompt through one forward, so
+    # the indexer's index_score and model.py's index_mask are both
+    # [bsz, Lin, end_pos] -- 57.6 GB EACH at Lin=120k, B=1. Feeding the prompt in
+    # chunks bounds them by chunk size instead. REQUIRES install_mla_absorbed:
+    # the stock MHA prefill branch reads only the local chunk and never the kv
+    # cache, so chunking without that override silently makes each chunk blind to
+    # the ones before it. All but the last chunk are cache-fill only; the final
+    # slice falls through to the loop below, which needs the logits.
+    if prefill_chunk and prompt_len > prefill_chunk:
+        n_chunks = (prompt_len + prefill_chunk - 1) // prefill_chunk
+        log_fn(f"[gen] chunked prefill: {prompt_len} tokens in {n_chunks} x {prefill_chunk}")
+        t_pf = time.perf_counter()
+        while prev_pos + prefill_chunk < prompt_len:
+            c0 = time.perf_counter()
+            transformer.forward(tokens[:, prev_pos:prev_pos + prefill_chunk], prev_pos)
+            prev_pos += prefill_chunk
+            _dt = (time.perf_counter() - c0) * 1000
+            log_fn(f"[gen]   prefill chunk -> pos {prev_pos}/{prompt_len} "
+                   f"in {_dt:.0f} ms{_stage_summary(_dt)}")
+        prefill_seconds = time.perf_counter() - t_pf
+
     for cur_pos in range(prompt_len, total_len):
         is_prefill = cur_pos == prompt_len
         t0 = time.perf_counter()
@@ -121,10 +161,13 @@ def greedy_decode(
         ids = next_token.tolist()
         shown = ids[0] if B == 1 else ids
         if is_prefill:
-            prefill_seconds = dt
+            # prefill_seconds, not dt: with chunking, dt is only the final slice
+            prefill_seconds += dt
             log_fn(
-                f"[gen] PREFILL done in {dt*1000:.0f} ms (B={B}, "
-                f"Lin={prompt_len}); first token id={shown}"
+                f"[gen] PREFILL done in {prefill_seconds*1000:.0f} ms (B={B}, "
+                f"Lin={prompt_len}; final slice {dt*1000:.0f} ms"
+                f"{_stage_summary(dt * 1000)}); "
+                f"first token id={shown}"
             )
         else:
             decode_seconds_total += dt

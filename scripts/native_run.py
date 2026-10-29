@@ -195,6 +195,12 @@ def _first_mismatch(expected: List[int], generated: List[int]) -> int:
     return -1
 
 
+# Set once from config["PREFILL_CHUNK"] before any decode. Module-level rather
+# than threaded through _decode_case_group / _decode_case_group_sharded and
+# their callers, which would be a wider change for no extra clarity.
+_PREFILL_CHUNK = 0
+
+
 def _decode_case_group(transformer, tokenizer, cases: List[Dict[str, Any]], log_fn) -> List[Dict[str, Any]]:
     """Tokenize + greedy decode `cases` TOGETHER as one batch of B=len(cases).
 
@@ -222,7 +228,8 @@ def _decode_case_group(transformer, tokenizer, cases: List[Dict[str, Any]], log_
 
     t0 = time.perf_counter()
     generated_rows, prefill_s, decode_s = greedy_decode(
-        transformer, prompt_tokens, lout, log_fn=log_fn
+        transformer, prompt_tokens, lout, log_fn=log_fn,
+        prefill_chunk=_PREFILL_CHUNK,
     )
     elapsed = time.perf_counter() - t0
 
@@ -697,6 +704,17 @@ def run(
 
         indexer_bcast_report = install_indexer_broadcast_skip(model_module, log_fn=log)
         base_result["indexer_bcast_report"] = indexer_bcast_report
+
+    # Chunked prefill must be installed BEFORE any forward: it rebinds
+    # MLA.forward onto the absorbed path so prefill reads the full kv cache.
+    # generation.py's chunking is unsafe without it.
+    if int(config.get("PREFILL_CHUNK") or 0) > 0:
+        from mla_absorbed import install_mla_absorbed  # src/overrides
+
+        global _PREFILL_CHUNK
+        _PREFILL_CHUNK = int(config["PREFILL_CHUNK"])
+        base_result["mla_absorbed_report"] = install_mla_absorbed(
+            transformer, model_module, log_fn=log)
 
     ep_moe_report: Optional[Dict[str, Any]] = None
     sharding_mode = config.get("SHARDING_MODE", "").lower()

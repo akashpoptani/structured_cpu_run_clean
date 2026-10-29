@@ -121,6 +121,20 @@ Implemented in `src/overrides/indexer_broadcast.py` as a shim bound onto `model.
 legitimately hold different tokens and the assert would fail — at which point this field should be
 removed and the shim made unconditional.
 
+## 9a. PREFILL_CHUNK
+
+Upstream prefills the whole prompt in one forward, so the indexer's score and mask tensors are
+`[B, Lin, Lin]` fp32 (57.6 GB each at Lin=120k, B=1), and its MHA prefill branch never reads the
+kv cache, so it cannot be split into chunks.
+
+- `0` (default): single-shot prefill on the upstream path.
+- `N > 0`: `generation.greedy_decode` feeds the prompt in chunks of `N` tokens, and
+  `native_run.py` installs `src/overrides/mla_absorbed.py`, which rebinds `MLA.forward` to the
+  absorbed (MQA) path: it reads the full kv cache and builds `[seqlen, end_pos]` masks, so every
+  chunk sees all earlier ones. The score tensors are bounded by `N`, not `Lin`.
+
+Must be a non-negative integer (checked by `parse_config.sh`).
+
 ## 10. Prompt source
 
 `PROMPT_SOURCE` selects how bench/generate prompts are built. Verify mode is unaffected — it reads
@@ -162,7 +176,7 @@ provenance.
 
 `SHARDED_CKPT_PATH` is the directory containing per-rank converted safetensor shards (filenames `model{rank}-mp{world_size}.safetensors`), produced offline by `../DeepSeek-V3.2/inference/convert.py`. Required when `REAL_RUN=1`. Should also contain `tokenizer.json` / `tokenizer_config.json`. Empty in the baseline.
 
-`DEQUANT_FP8_WEIGHTS` controls optional pre-dequantization of FP8 weights to BF16 in place once at load. Supported values are `all` (matches the legacy TP2 token-exact convention) and `none` (keeps FP8; the per-call FP32 fallback in `src/overrides/kernel.py` runs instead). The legacy `dense` scope is intentionally not exposed in the clean lane until DP2 EP-off support lands.
+`DEQUANT_FP8_WEIGHTS` controls optional pre-dequantization of FP8 weights to BF16 in place once at load. Supported values are `all` (the default; matches the legacy TP2 token-exact convention, and keeps every projection a BF16 GEMM) and `none` (keeps FP8; the per-call FP32 fallback in `src/overrides/kernel.py` runs instead). The legacy `dense` scope is intentionally not exposed in the clean lane until DP2 EP-off support lands.
 
 `DEQUANT_CACHE_MODE` (`off` | `write` | `read` | `read_or_write`) and `DEQUANT_CACHE_PATH` control optional persistence of the per-rank dequant=all BF16 weights to scratch, so subsequent runs can skip the ~51 min dequant pass. The cache layout is **sharded**: a per-rank `model{rank}-mp{world_size}-bf16-dequant-all.index.json` (canonical existence marker, written last) + N `…-{NNNNN}.safetensors` files (~20 GiB each) + a `…-bf16-dequant-all.metadata.json` sibling. `read` and `read_or_write` (cache-hit) cause `ModelArgs.dtype` to be overridden to `bf16` before construction so Linear layers do not allocate FP8 parameters.
 
