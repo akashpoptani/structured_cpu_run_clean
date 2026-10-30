@@ -8,11 +8,14 @@ See [README.md](README.md) for the full flow. This file is the terse command ind
 # sparse prefill kernel: builds, generates bins from a real top-k dump, checks 3 sets (all must PASS)
 srun -p ramanvr -A ramanvr -N1 -n1 -c32 --mem=64G -t 00:20:00 bash FlashMLA_CPU/test_prefill_sparse.sh
 
-# build the model's kernel library (needed before any USE_AMX_ATTENTION=1 run)
+# indexer kernel: random fp8-valued inputs vs a double reference, plus timing (all must PASS)
+srun -p ramanvr -A ramanvr -N1 -n1 -c96 --mem=64G -t 00:20:00 bash FlashMLA_CPU/test_indexer.sh
+
+# build the model's kernel libraries (needed before any USE_AMX_PREFILL_ATTENTION=1 / USE_AMX_PREFILL_INDEXER=1 run)
 srun -p ramanvr -A ramanvr -N1 -n1 -c4 --mem=8G -t 00:10:00 bash FlashMLA_CPU/build_libs.sh
 ```
 
-See [FlashMLA_CPU/README.md](FlashMLA_CPU/README.md#sparse-prefill-kernel).
+See [FlashMLA_CPU/README.md](FlashMLA_CPU/README.md#sparse-prefill-kernel) and [Indexer kernel](FlashMLA_CPU/README.md#indexer-kernel).
 
 ## Real native runs (current)
 

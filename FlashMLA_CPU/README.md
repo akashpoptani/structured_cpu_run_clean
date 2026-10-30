@@ -163,17 +163,53 @@ srun -p ramanvr -A ramanvr -N1 -n1 -c32 --mem=64G -t 00:20:00 \
 ```
 
 Using it in the model: build the shared library once (on an AMX node; it needs gcc 13), then set
-`USE_AMX_ATTENTION=1` in the run's config.
+`USE_AMX_PREFILL_ATTENTION=1` in the run's config.
 
 ```bash
 srun -p ramanvr -A ramanvr -N1 -n1 -c4 --mem=8G -t 00:10:00 bash FlashMLA_CPU/build_libs.sh
-#  -> FlashMLA_CPU/libflashmla_prefill.so (gitignored), entry point flashmla_prefill_sparse
+#  -> FlashMLA_CPU/amx_prefill_attention.so (gitignored), entry point flashmla_prefill_sparse
+#  -> FlashMLA_CPU/amx_prefill_indexer.so (gitignored), entry point flashmla_indexer
 ```
 
-`src/overrides/amx_attention.py` loads it with `ctypes` and hands it the model's tensors by
+`src/overrides/amx_prefill_attention.py` loads it with `ctypes` and hands it the model's tensors by
 pointer (`data_ptr()`), with no copies; `mla_absorbed.py` calls it in place of the torch
 attention core for every prefill forward. The library is linked with `-static-libstdc++`
 because model jobs do not load the gcc module.
+
+## Indexer kernel
+
+`bench_indexer_amx.cpp` computes the DeepSeek-V3.2 indexer scores for prefill, in place of the torch
+`fp8_index` in `src/overrides/kernel.py`:
+
+    out[m, n] = ( sum_h relu(q[m,h,:] . k[n,:]) * w[m,h] ) * k_scale[n]      q: [M,64,128], k: [N,128]
+
+The torch version builds a per-head `[M, 64, N]` fp32 tensor (64x the result) and runs at about
+0.2 TFLOP/s. The kernel keeps each 16x16 score tile in AMX/AVX registers, applies relu, the
+per-head weight and the sum over heads there, and writes `[M, N]` once.
+
+- Tile rows are **16 queries**; 4 accumulator tiles cover 64 keys; the loop over the 64 heads is
+  inside, so a query tile's partial sums never leave the core.
+- K is packed to VNNI once per call and shared by all query tiles.
+- It scores all N keys. The causal mask and top-k stay in torch.
+- Prefill only (M > 1). At decode M = 1 would waste 15 of 16 tile rows; decode keeps torch.
+- fp8 -> bf16 is exact, so only the summation order differs from torch.
+
+```bash
+srun -p ramanvr -A ramanvr -N1 -n1 -c96 --mem=64G -t 00:20:00 bash FlashMLA_CPU/test_indexer.sh
+```
+
+Measured (88 threads, H=64, D=128, all PASS, rel. error about 3e-7):
+
+| M (queries) | N (keys) | time | TFLOP/s |
+|---|---|---|---|
+| 2048 | 4096 | 4.2 ms | 32.4 |
+| 2048 | 32768 | 32.6 ms | 33.7 |
+| 2048 | 120000 | 120.5 ms | 33.4 |
+| 4096 | 120000 | 239.6 ms | 33.6 |
+
+In the model: set `USE_AMX_PREFILL_INDEXER=1` after `build_libs.sh` (it builds `amx_prefill_indexer.so`
+alongside the prefill library). `src/overrides/amx_prefill_indexer.py` loads it and sets
+`kernel.INDEX_IMPL`, which `fp8_index` uses whenever M > 1.
 
 ## Hardware and workload
 

@@ -14,6 +14,7 @@ bench_dense_onednn
 prefill_bins_*
 prefill_sparse_bins/
 libflashmla_*.so
+amx_prefill_*.so
 
 # Dense-causal prefill: reference/baseline only, not in the live path. They are
 # per-head MHA, so they need per-head K/V (10.7 GB/layer at 128k) and are

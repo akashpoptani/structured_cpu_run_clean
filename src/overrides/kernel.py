@@ -1,3 +1,4 @@
+import time
 from typing import Optional, Tuple
 
 import torch
@@ -86,19 +87,40 @@ def fp8_gemm(
     return out.to(torch.get_default_dtype())
 
 
+# Prefill indexer-score kernel, set by
+# amx_prefill_indexer.install_amx_prefill_indexer(). Read at call time and used
+# only when M > 1; decode keeps the torch path below.
+INDEX_IMPL = None
+
+# Prefill (M > 1) wall time of fp8_index in ms, summed over layers and drained by
+# generation._stage_summary. A sub-part of mla_absorbed's "indexer" stage, which
+# also covers the indexer projections, mask add and top-k.
+INDEX_MS = 0.0
+
+
 def fp8_index(
     q: torch.Tensor,
     q_s: torch.Tensor,
     k: torch.Tensor,
     k_s: torch.Tensor,
 ) -> torch.Tensor:
+    global INDEX_MS
     # The upstream kernel consumes per-head and per-token scales without the
     # trailing singleton block dimension that the Python fallback currently sees.
     if q_s.dim() == q.dim():
         q_s = q_s.squeeze(-1)
     if k_s.dim() == k.dim():
         k_s = k_s.squeeze(-1)
+    if q.size(1) == 1:
+        return _fp8_index_torch(q, q_s, k, k_s)
+    t0 = time.perf_counter()
+    impl = INDEX_IMPL if INDEX_IMPL is not None else _fp8_index_torch
+    out = impl(q, q_s, k, k_s)
+    INDEX_MS += (time.perf_counter() - t0) * 1e3
+    return out
 
+
+def _fp8_index_torch(q, q_s, k, k_s):
     logits = torch.einsum("bmhd,bnd->bmhn", q.float(), k.float())
     logits = logits.clamp_min_(0)
     logits = logits * q_s.float().unsqueeze(-1)

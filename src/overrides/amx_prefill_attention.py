@@ -1,6 +1,6 @@
 """ctypes binding for the AMX sparse PREFILL attention kernel.
 
-Loads FlashMLA_CPU/libflashmla_prefill.so (build: FlashMLA_CPU/build_libs.sh) and
+Loads FlashMLA_CPU/amx_prefill_attention.so (build: FlashMLA_CPU/build_libs.sh) and
 plugs it into mla_absorbed as PREFILL_IMPL, which replaces the torch
 score-everything-then-mask core for seqlen > 1. Decode is not touched.
 
@@ -18,7 +18,7 @@ from typing import Any, Callable, Dict, Optional
 _LIB: Optional[ctypes.CDLL] = None
 _DEFAULT_SO = os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-    "FlashMLA_CPU", "libflashmla_prefill.so")
+    "FlashMLA_CPU", "amx_prefill_attention.so")
 
 
 def _load(so_path: str) -> ctypes.CDLL:
@@ -52,7 +52,7 @@ def prefill_attention(q_nope, q_pe, kv_cache, pe_cache, topk, scale: float,
     """
     import torch
 
-    assert _LIB is not None, "call install_amx_attention() first"
+    assert _LIB is not None, "call install_amx_prefill_attention() first"
     B, Sq, H, Dn = q_nope.shape
     S, K = kv_cache.shape[1], topk.shape[-1]
     assert Dn == 512 and q_pe.shape == (B, Sq, H, 64), (q_nope.shape, q_pe.shape)
@@ -80,7 +80,7 @@ def prefill_attention(q_nope, q_pe, kv_cache, pe_cache, topk, scale: float,
     return out
 
 
-def install_amx_attention(so_path: Optional[str] = None,
+def install_amx_prefill_attention(so_path: Optional[str] = None,
                           log_fn: Callable[[str], None] = print) -> Dict[str, Any]:
     """Point mla_absorbed.PREFILL_IMPL at the kernel. Fails loudly if the .so is
     missing: a run that asked for the kernel must not silently measure torch."""
@@ -92,5 +92,5 @@ def install_amx_attention(so_path: Optional[str] = None,
         raise FileNotFoundError(f"{path} not found; run bash FlashMLA_CPU/build_libs.sh on an AMX node")
     _LIB = _load(path)
     mla_absorbed.PREFILL_IMPL = prefill_attention
-    log_fn(f"[amx-attention] prefill kernel: {path}")
+    log_fn(f"[amx-prefill-attention] prefill kernel: {path}")
     return {"installed": True, "prefill": path}

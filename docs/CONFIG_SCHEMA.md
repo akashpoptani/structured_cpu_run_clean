@@ -135,18 +135,30 @@ kv cache, so it cannot be split into chunks.
 
 Must be a non-negative integer (checked by `parse_config.sh`).
 
-## 9b. USE_AMX_ATTENTION
+## 9b. USE_AMX_PREFILL_ATTENTION
 
 - `0` (default): the prefill attention core is torch: score every cached position, mask all but
   the indexer's top-k, softmax, multiply by V.
 - `1`: the core runs in the AMX sparse kernel (`FlashMLA_CPU/bench_prefill_sparse_amx.cpp`, built
-  as `libflashmla_prefill.so` by `FlashMLA_CPU/build_libs.sh`), which reads only each query's top-k
-  cache rows. `src/overrides/amx_attention.py` loads it with ctypes and sets
+  as `amx_prefill_attention.so` by `FlashMLA_CPU/build_libs.sh`), which reads only each query's top-k
+  cache rows. `src/overrides/amx_prefill_attention.py` loads it with ctypes and sets
   `mla_absorbed.PREFILL_IMPL`; the run fails at startup if the `.so` is missing. Because the kernel
   lives inside the absorbed forward, `mla_absorbed` is installed even when `PREFILL_CHUNK=0`.
   Decode is unaffected.
 
-`AMX_ATTENTION_SO` overrides the library path; empty means the default location.
+`AMX_PREFILL_ATTENTION_SO` overrides the library path; empty means the default location.
+
+## 9c. USE_AMX_PREFILL_INDEXER
+
+- `0` (default): the indexer scores (`fp8_index` in `src/overrides/kernel.py`) are computed in
+  torch, which builds a per-head `[M, 64, N]` fp32 tensor.
+- `1`: for prefill (M > 1) they run in the AMX kernel (`FlashMLA_CPU/bench_indexer_amx.cpp`, built
+  as `amx_prefill_indexer.so` by `FlashMLA_CPU/build_libs.sh`). `src/overrides/amx_prefill_indexer.py`
+  loads it and sets `kernel.INDEX_IMPL`; the run fails at startup if the `.so` is missing. The
+  causal mask and top-k stay in torch. Works with or without the absorbed path. Decode is
+  unaffected.
+
+`AMX_PREFILL_INDEXER_SO` overrides the library path; empty means the default location.
 
 ## 10. Prompt source
 

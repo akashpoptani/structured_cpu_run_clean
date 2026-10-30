@@ -53,7 +53,7 @@ def _tick(name, t0):
 _CMASK_KEY = None
 _CMASK = None
 
-# Prefill attention-core kernel, set by amx_attention.install_amx_attention().
+# Prefill attention-core kernel, set by amx_prefill_attention.install_amx_prefill_attention().
 # Read at call time: when set, it replaces the torch score/mask/softmax/value
 # core below; projections, RoPE, cache writes, indexer and wo stay shared.
 PREFILL_IMPL: Optional[Callable[..., Any]] = None

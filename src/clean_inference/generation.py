@@ -60,11 +60,17 @@ def _stage_summary(dt_ms: float) -> str:
     """
     import sys as _sys
     _cp = _sys.modules.get("mla_absorbed")
+    # kernel.INDEX_MS: the fp8_index part of "indexer", shown as indexer=X(score=Y)
+    # and not added to MLA_sum again.
+    _kn = _sys.modules.get("kernel")
+    idx = getattr(_kn, "INDEX_MS", 0.0)
+    if idx:
+        _kn.INDEX_MS = 0.0
     if _cp is None or not _cp.STAGE_MS:
-        return ""
+        return f"  [index_score={idx:.0f}]" if idx else ""
     tot = sum(_cp.STAGE_MS.values())
-    parts = " ".join(f"{k}={v:.0f}" for k, v in
-                     sorted(_cp.STAGE_MS.items(), key=lambda kv: -kv[1]))
+    parts = " ".join(f"{k}={v:.0f}" + (f"(score={idx:.0f})" if k == "indexer" and idx else "")
+                     for k, v in sorted(_cp.STAGE_MS.items(), key=lambda kv: -kv[1]))
     _cp.STAGE_MS.clear()
     return f"  [{parts} MLA_sum={tot:.0f} other={dt_ms - tot:.0f}]"
 
