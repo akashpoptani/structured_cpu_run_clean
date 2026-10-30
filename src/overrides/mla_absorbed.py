@@ -35,7 +35,7 @@ both stay correct at any start_pos.
 from __future__ import annotations
 
 import time
-from typing import Any, Callable, Dict
+from typing import Any, Callable, Dict, Optional
 
 # Per-stage wall time inside MLA.forward, summed across layers and drained by
 # generation._stage_summary after each prefill forward. Says which of
@@ -52,6 +52,11 @@ def _tick(name, t0):
 # [2048 x 88064] fp32 tensor (721 MB) 61 times per chunk. One-entry cache.
 _CMASK_KEY = None
 _CMASK = None
+
+# Prefill attention-core kernel, set by amx_attention.install_amx_attention().
+# Read at call time: when set, it replaces the torch score/mask/softmax/value
+# core below; projections, RoPE, cache writes, indexer and wo stay shared.
+PREFILL_IMPL: Optional[Callable[..., Any]] = None
 
 
 def _causal_mask(x, seqlen: int, start_pos: int, end_pos: int):
@@ -86,7 +91,27 @@ def install_mla_absorbed(
     apply_rotary_emb = model_module.apply_rotary_emb
     weight_dequant = model_module.weight_dequant
 
-    def forward_torch(self, x, start_pos: int, freqs_cis, mask):
+    def attention_torch(self, q_nope, q_pe, topk_indices, cmask, bsz, seqlen, end_pos):
+        """Dense core: score every cached position, -inf all but top-k, softmax, x V."""
+        scores = (torch.einsum("bshc,btc->bsht", q_nope, self.kv_cache[:bsz, :end_pos])
+                  + torch.einsum("bshr,btr->bsht", q_pe, self.pe_cache[:bsz, :end_pos])
+                  ) * self.softmax_scale
+        # In-place throughout. Each [bsz, seqlen, H, end_pos] fp32 temporary is
+        # 2.1 GB at chunk=1024/end_pos=4096, and the out-of-place form allocated
+        # three of them per layer (mask-add, softmax, cast) on top of ~600 GB of
+        # resident weights. That is what wedged the first attempt, not the math:
+        # a per-layer microbenchmark put the absorbed core at 0.68 s, on par with
+        # MHA's 2.66 s for 4x the tokens.
+        index_mask = torch.full((bsz, seqlen, end_pos), float("-inf"),
+                                device=q_nope.device).scatter_(-1, topk_indices, 0)
+        if cmask is not None:
+            index_mask += cmask
+        scores += index_mask.unsqueeze(2)
+        del index_mask
+        scores = scores.softmax(dim=-1, dtype=torch.float32).to(q_nope.dtype)
+        return torch.einsum("bsht,btc->bshc", scores, self.kv_cache[:bsz, :end_pos])
+
+    def forward_prefill(self, x, start_pos: int, freqs_cis, mask):
         bsz, seqlen, _ = x.size()
         end_pos = start_pos + seqlen
 
@@ -122,32 +147,24 @@ def install_mla_absorbed(
         q_nope = torch.einsum("bshd,hdc->bshc", q_nope, wkv_b[:, :self.qk_nope_head_dim])
         _tick("absorb_q", _t)
 
-        _t = time.perf_counter()
-        scores = (torch.einsum("bshc,btc->bsht", q_nope, self.kv_cache[:bsz, :end_pos])
-                  + torch.einsum("bshr,btr->bsht", q_pe, self.pe_cache[:bsz, :end_pos])
-                  ) * self.softmax_scale
-
         # the indexer needs the SAME [seqlen, end_pos] mask, not [seqlen, seqlen]
-        # In-place throughout. Each [bsz, seqlen, H, end_pos] fp32 temporary is
-        # 2.1 GB at chunk=1024/end_pos=4096, and the out-of-place form allocated
-        # three of them per layer (mask-add, softmax, cast) on top of ~600 GB of
-        # resident weights. That is what wedged the first attempt, not the math:
-        # a per-layer microbenchmark put the absorbed core at 0.68 s, on par with
-        # MHA's 2.66 s for 4x the tokens.
-        _tick("attention", _t)   # scores; mask/softmax/value add to it below
         _t = time.perf_counter()
         topk_indices = self.indexer(x, qr, start_pos, freqs_cis, cmask)
         _tick("indexer", _t)
-        _t = time.perf_counter()
-        index_mask = torch.full((bsz, seqlen, end_pos), float("-inf"),
-                                device=x.device).scatter_(-1, topk_indices, 0)
-        if cmask is not None:
-            index_mask += cmask
-        scores += index_mask.unsqueeze(2)
-        del index_mask
 
-        scores = scores.softmax(dim=-1, dtype=torch.float32).to(x.dtype)
-        y = torch.einsum("bsht,btc->bshc", scores, self.kv_cache[:bsz, :end_pos])
+        _t = time.perf_counter()
+        if PREFILL_IMPL is not None:
+            # AMX kernel: reads only each query's top-k cache rows and applies
+            # the causal filter itself. Its tiles are 16 heads of one query, so
+            # q needs [B,S,H,D] memory order; the absorb einsum above returns a
+            # head-major view ([B,H,S,D] in memory), hence one transpose-copy
+            # (134 MB at chunk 2048). Cache slabs and topk are passed as-is.
+            y = PREFILL_IMPL(q_nope.contiguous(), q_pe.contiguous(),
+                             self.kv_cache[:bsz], self.pe_cache[:bsz],
+                             topk_indices, float(self.softmax_scale),
+                             start_pos=start_pos, end_pos=end_pos)
+        else:
+            y = attention_torch(self, q_nope, q_pe, topk_indices, cmask, bsz, seqlen, end_pos)
         _tick("attention", _t)
         _t = time.perf_counter()
         y = torch.einsum("bshc,hdc->bshd", y, wkv_b[:, -self.v_head_dim:])
@@ -159,12 +176,13 @@ def install_mla_absorbed(
 
     def forward_dispatch(self, x, start_pos, freqs_cis, mask):
         # Decode (seqlen == 1) stays on upstream's own MQA branch, untouched.
-        # forward_torch is that same branch generalised to seqlen > 1.
+        # forward_prefill is that same branch generalised to seqlen > 1.
         if x.size(1) == 1:
             return upstream_forward(self, x, start_pos, freqs_cis, mask)
-        return forward_torch(self, x, start_pos, freqs_cis, mask)
+        return forward_prefill(self, x, start_pos, freqs_cis, mask)
 
     MLA.forward = forward_dispatch
     log_fn("[mla-absorbed] MLA.forward rebound: absorbed path for prefill "
-           "([seqlen, end_pos] masks, no per-head K/V); decode stays upstream")
+           "([seqlen, end_pos] masks, no per-head K/V); decode stays upstream; "
+           f"prefill attention core: {'AMX kernel' if PREFILL_IMPL is not None else 'torch'}")
     return {"installed": True, "path": "absorbed", "layers": len(transformer.layers)}

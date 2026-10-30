@@ -162,6 +162,19 @@ srun -p ramanvr -A ramanvr -N1 -n1 -c32 --mem=64G -t 00:20:00 \
 # TOPK_NPY=<topk_layerNNN.npy> overrides the dump; OUT=<dir> the bins/binary location
 ```
 
+Using it in the model: build the shared library once (on an AMX node; it needs gcc 13), then set
+`USE_AMX_ATTENTION=1` in the run's config.
+
+```bash
+srun -p ramanvr -A ramanvr -N1 -n1 -c4 --mem=8G -t 00:10:00 bash FlashMLA_CPU/build_libs.sh
+#  -> FlashMLA_CPU/libflashmla_prefill.so (gitignored), entry point flashmla_prefill_sparse
+```
+
+`src/overrides/amx_attention.py` loads it with `ctypes` and hands it the model's tensors by
+pointer (`data_ptr()`), with no copies; `mla_absorbed.py` calls it in place of the torch
+attention core for every prefill forward. The library is linked with `-static-libstdc++`
+because model jobs do not load the gcc module.
+
 ## Hardware and workload
 
 Intel Xeon Platinum 8468 (Sapphire Rapids): 2 sockets x 48 cores = 96, **no SMT**, 2 NUMA nodes

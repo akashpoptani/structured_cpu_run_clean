@@ -2,11 +2,14 @@
 
 See [README.md](README.md) for the full flow. This file is the terse command index.
 
-## AMX kernel standalone tests
+## AMX kernels: standalone test and build
 
 ```bash
 # sparse prefill kernel: builds, generates bins from a real top-k dump, checks 3 sets (all must PASS)
 srun -p ramanvr -A ramanvr -N1 -n1 -c32 --mem=64G -t 00:20:00 bash FlashMLA_CPU/test_prefill_sparse.sh
+
+# build the model's kernel library (needed before any USE_AMX_ATTENTION=1 run)
+srun -p ramanvr -A ramanvr -N1 -n1 -c4 --mem=8G -t 00:10:00 bash FlashMLA_CPU/build_libs.sh
 ```
 
 See [FlashMLA_CPU/README.md](FlashMLA_CPU/README.md#sparse-prefill-kernel).

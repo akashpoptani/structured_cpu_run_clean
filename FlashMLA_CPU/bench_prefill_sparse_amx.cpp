@@ -96,11 +96,11 @@ static inline void pack_k_chunk_amx(const bf16* s, bf16* d, int stride) {
 // may attend only to t <= that. topk alone does NOT guarantee it: upstream takes
 // topk(min(2048, end_pos)) AFTER adding the causal mask, so any query with fewer
 // than 2048 past positions gets its set padded with FUTURE positions (scored -inf
-// but still selected). Upstream and mla_absorbed.forward_torch remove them by adding the
+// but still selected). Upstream and mla_absorbed.attention_torch remove them by adding the
 // causal mask back; this kernel has no mask, so it must drop them here. The
 // unsigned compare also rejects t < 0.
 //
-// OPERANDS -- each is the tensor mla_absorbed.forward_amx already holds, so the
+// OPERANDS -- each is the tensor mla_absorbed.forward_prefill already holds, so the
 // Python side passes pointers and copies nothing:
 //   Qn   [B][Sq][H][512]  bf16   absorbed q_nope      (was cat'ed with q_pe: 2.4 GB/layer)
 //   Qp   [B][Sq][H][64]   bf16   q_pe

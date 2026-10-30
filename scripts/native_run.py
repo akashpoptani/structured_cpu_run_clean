@@ -705,10 +705,20 @@ def run(
         indexer_bcast_report = install_indexer_broadcast_skip(model_module, log_fn=log)
         base_result["indexer_bcast_report"] = indexer_bcast_report
 
+    # AMX prefill attention: sets mla_absorbed.PREFILL_IMPL, and raises if the
+    # .so is missing rather than silently measuring the torch core.
+    use_amx_attention = (config.get("USE_AMX_ATTENTION") or "0").strip() == "1"
+    if use_amx_attention:
+        from amx_attention import install_amx_attention  # src/overrides
+
+        base_result["amx_attention_report"] = install_amx_attention(
+            so_path=(config.get("AMX_ATTENTION_SO") or "").strip() or None, log_fn=log)
+
     # Chunked prefill must be installed BEFORE any forward: it rebinds
     # MLA.forward onto the absorbed path so prefill reads the full kv cache.
-    # generation.py's chunking is unsafe without it.
-    if int(config.get("PREFILL_CHUNK") or 0) > 0:
+    # generation.py's chunking is unsafe without it. The AMX kernel runs inside
+    # that same forward, so it needs the install even without chunking.
+    if int(config.get("PREFILL_CHUNK") or 0) > 0 or use_amx_attention:
         from mla_absorbed import install_mla_absorbed  # src/overrides
 
         global _PREFILL_CHUNK

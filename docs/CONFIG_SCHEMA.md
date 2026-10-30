@@ -135,6 +135,19 @@ kv cache, so it cannot be split into chunks.
 
 Must be a non-negative integer (checked by `parse_config.sh`).
 
+## 9b. USE_AMX_ATTENTION
+
+- `0` (default): the prefill attention core is torch: score every cached position, mask all but
+  the indexer's top-k, softmax, multiply by V.
+- `1`: the core runs in the AMX sparse kernel (`FlashMLA_CPU/bench_prefill_sparse_amx.cpp`, built
+  as `libflashmla_prefill.so` by `FlashMLA_CPU/build_libs.sh`), which reads only each query's top-k
+  cache rows. `src/overrides/amx_attention.py` loads it with ctypes and sets
+  `mla_absorbed.PREFILL_IMPL`; the run fails at startup if the `.so` is missing. Because the kernel
+  lives inside the absorbed forward, `mla_absorbed` is installed even when `PREFILL_CHUNK=0`.
+  Decode is unaffected.
+
+`AMX_ATTENTION_SO` overrides the library path; empty means the default location.
+
 ## 10. Prompt source
 
 `PROMPT_SOURCE` selects how bench/generate prompts are built. Verify mode is unaffected — it reads
