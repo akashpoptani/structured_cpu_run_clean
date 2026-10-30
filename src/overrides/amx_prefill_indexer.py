@@ -30,6 +30,7 @@ def _load(so_path: str) -> ctypes.CDLL:
         ctypes.c_void_p,                           # out [B,M,N] fp32
         ctypes.c_int, ctypes.c_int, ctypes.c_int,  # B, M, N
         ctypes.c_int, ctypes.c_int,                # H, D
+        ctypes.c_int,                              # kv_bf16: 1 = no key scale, k_s unused
     ]
     return lib
 
@@ -54,6 +55,10 @@ def index_scores(q, q_s, k, k_s):
         k   [B,N,D]   fp8   k_s [B,N]   fp32
         -> [B,M,N] fp32 = sum_h relu(q.k) * q_s, times k_s
 
+    KV_CACHE_DTYPE=bf16 is read off k.dtype: q and k are bf16, q_s has no
+    q_scale, and k_s (all ones) is not copied or passed; the kernel's bf16
+    instantiation skips the key-scale multiply.
+
     The result is a view of a persistent buffer, valid until the next call.
     Indexer.forward consumes it (mask add, top-k) before the next layer runs.
     """
@@ -65,6 +70,8 @@ def index_scores(q, q_s, k, k_s):
     assert k.shape == (B, N, D) and q_s.shape == (B, M, H) and k_s.shape == (B, N), \
         (q.shape, q_s.shape, k.shape, k_s.shape)
     assert D % 32 == 0, D
+    kv_bf16 = k.dtype == torch.bfloat16
+    assert (q.dtype == torch.bfloat16) == kv_bf16, (q.dtype, k.dtype)
     # One converting copy each into persistent buffers. The padding is left as
     # is: out[m, n] reads only query row m and key row n, so a padded row or key
     # only reaches an output entry that is sliced off below.
@@ -75,11 +82,14 @@ def index_scores(q, q_s, k, k_s):
     kb[:, :N] = k
     qs = _scratch("q_s", (B, Mp, H), torch.float32)
     qs[:, :M] = q_s
-    ks = _scratch("k_s", (B, Np), torch.float32)
-    ks[:, :N] = k_s
+    ks_ptr = None                                  # NULL: bf16 path has no key scale
+    if not kv_bf16:
+        ks = _scratch("k_s", (B, Np), torch.float32)
+        ks[:, :N] = k_s
+        ks_ptr = ks.data_ptr()
     out = _scratch("out", (B, Mp, Np), torch.float32)
-    rc = _LIB.flashmla_indexer(qb.data_ptr(), kb.data_ptr(), qs.data_ptr(), ks.data_ptr(),
-                               out.data_ptr(), B, Mp, Np, H, D)
+    rc = _LIB.flashmla_indexer(qb.data_ptr(), kb.data_ptr(), qs.data_ptr(), ks_ptr,
+                               out.data_ptr(), B, Mp, Np, H, D, int(kv_bf16))
     if rc != 0:
         raise RuntimeError(f"flashmla_indexer failed (rc={rc}); rc=-1: AMX tile permission "
                            f"denied, rc=-2: shape not padded to M%16 / N%64 / D%32")

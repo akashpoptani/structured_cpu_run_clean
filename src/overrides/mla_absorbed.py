@@ -58,6 +58,11 @@ _CMASK = None
 # core below; projections, RoPE, cache writes, indexer and wo stay shared.
 PREFILL_IMPL: Optional[Callable[..., Any]] = None
 
+# KV_CACHE_DTYPE, set by install_mla_absorbed. "fp8" keeps upstream's fp8
+# round-trip on kv before the bf16 cache write; "bf16" stores kv as is, and then
+# decode runs here too, since upstream's decode branch would round-trip again.
+KV_CACHE_DTYPE = "fp8"
+
 
 def _causal_mask(x, seqlen: int, start_pos: int, end_pos: int):
     """[seqlen, end_pos] causal mask, cached across the layers of one chunk."""
@@ -81,9 +86,13 @@ def install_mla_absorbed(
     transformer: Any,
     model_module: Any,
     log_fn: Callable[[str], None] = print,
+    kv_cache_dtype: str = "fp8",
 ) -> Dict[str, Any]:
     """Rebind MLA.forward so prefill uses the absorbed path with correct masks."""
     import torch
+    global KV_CACHE_DTYPE
+    assert kv_cache_dtype in ("fp8", "bf16"), kv_cache_dtype
+    KV_CACHE_DTYPE = kv_cache_dtype
 
     MLA = model_module.MLA
     act_quant = model_module.act_quant
@@ -127,10 +136,11 @@ def install_mla_absorbed(
         kv, k_pe = torch.split(kv, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
         kv = self.kv_norm(kv)
         k_pe = apply_rotary_emb(k_pe.unsqueeze(2), freqs_cis)
-        # upstream simulates an fp8 kv cache by round-tripping through fp8
-        kv_fp8, kv_scale = act_quant(kv, block_size, self.scale_fmt)
-        kv = (kv_fp8.view(-1, block_size).float()
-              * kv_scale.view(-1, 1)).to(kv.dtype).view_as(kv)
+        if KV_CACHE_DTYPE == "fp8":
+            # upstream simulates an fp8 kv cache by round-tripping through fp8
+            kv_fp8, kv_scale = act_quant(kv, block_size, self.scale_fmt)
+            kv = (kv_fp8.view(-1, block_size).float()
+                  * kv_scale.view(-1, 1)).to(kv.dtype).view_as(kv)
         self.kv_cache[:bsz, start_pos:end_pos] = kv
         self.pe_cache[:bsz, start_pos:end_pos] = k_pe.squeeze(2)
         _tick("qkv_proj", _t)
@@ -153,7 +163,7 @@ def install_mla_absorbed(
         _tick("indexer", _t)
 
         _t = time.perf_counter()
-        if PREFILL_IMPL is not None:
+        if PREFILL_IMPL is not None and seqlen > 1:
             # AMX kernel: reads only each query's top-k cache rows and applies
             # the causal filter itself. Its tiles are 16 heads of one query, so
             # q needs [B,S,H,D] memory order; the absorb einsum above returns a
@@ -175,14 +185,16 @@ def install_mla_absorbed(
     upstream_forward = MLA.forward
 
     def forward_dispatch(self, x, start_pos, freqs_cis, mask):
-        # Decode (seqlen == 1) stays on upstream's own MQA branch, untouched.
-        # forward_prefill is that same branch generalised to seqlen > 1.
-        if x.size(1) == 1:
+        # fp8 decode (seqlen == 1) stays on upstream's own MQA branch, untouched.
+        # forward_prefill is that same branch generalised to seqlen > 1; bf16
+        # decode uses it (torch core) so the cache write skips the round-trip.
+        if x.size(1) == 1 and KV_CACHE_DTYPE == "fp8":
             return upstream_forward(self, x, start_pos, freqs_cis, mask)
         return forward_prefill(self, x, start_pos, freqs_cis, mask)
 
     MLA.forward = forward_dispatch
     log_fn("[mla-absorbed] MLA.forward rebound: absorbed path for prefill "
-           "([seqlen, end_pos] masks, no per-head K/V); decode stays upstream; "
+           f"([seqlen, end_pos] masks, no per-head K/V); KV_CACHE_DTYPE={KV_CACHE_DTYPE}; "
+           f"decode {'stays upstream' if KV_CACHE_DTYPE == 'fp8' else 'absorbed, torch core'}; "
            f"prefill attention core: {'AMX kernel' if PREFILL_IMPL is not None else 'torch'}")
     return {"installed": True, "path": "absorbed", "layers": len(transformer.layers)}

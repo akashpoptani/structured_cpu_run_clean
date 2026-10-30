@@ -726,13 +726,19 @@ def run(
     # MLA.forward onto the absorbed path so prefill reads the full kv cache.
     # generation.py's chunking is unsafe without it. The AMX kernel runs inside
     # that same forward, so it needs the install even without chunking.
-    if int(config.get("PREFILL_CHUNK") or 0) > 0 or use_amx_prefill_attention:
+    # KV_CACHE_DTYPE=bf16 also needs both overrides: upstream quantises both
+    # caches inside MLA.forward and Indexer.forward, with no switch.
+    kv_cache_dtype = config["KV_CACHE_DTYPE"]
+    if int(config.get("PREFILL_CHUNK") or 0) > 0 or use_amx_prefill_attention or kv_cache_dtype == "bf16":
         from mla_absorbed import install_mla_absorbed  # src/overrides
+        from indexer_forward import install_indexer_forward  # src/overrides
 
         global _PREFILL_CHUNK
         _PREFILL_CHUNK = int(config["PREFILL_CHUNK"])
         base_result["mla_absorbed_report"] = install_mla_absorbed(
-            transformer, model_module, log_fn=log)
+            transformer, model_module, log_fn=log, kv_cache_dtype=kv_cache_dtype)
+        base_result["indexer_forward_report"] = install_indexer_forward(
+            transformer, model_module, kv_cache_dtype=kv_cache_dtype, log_fn=log)
 
     ep_moe_report: Optional[Dict[str, Any]] = None
     sharding_mode = config.get("SHARDING_MODE", "").lower()

@@ -17,8 +17,11 @@
 //   * relu + q_s scale + head accumulation happen on the 16x16 tile in AVX-512,
 //     so the [M,N] score matrix is written exactly ONCE instead of 64 times
 //
-// bf16 is not a precision loss here: the inputs are already fp8_e4m3 (3 mantissa
-// bits); bf16 has 8.
+// Two instantiations, picked by kv_bf16 on the C ABI (KV_CACHE_DTYPE):
+//   fp8   KEY_SCALE=true: q and k arrive as fp8 values widened to bf16 (exact:
+//         3 mantissa bits into 8), and the result is multiplied by k_s[n].
+//   bf16  KEY_SCALE=false: q and k are plain bf16, there is no k_s (KS may be
+//         NULL) and the final multiply is compiled out.
 //
 // PREFILL only: tile rows are 16 QUERIES. At decode M=1 would waste 15/16 of each
 // tile, so decode keeps the torch path (kernel.py) until it has its own kernel.
@@ -26,7 +29,8 @@
 //
 // Standalone: main() below fills fp8-representable random inputs, checks sampled
 // rows against a double-precision reference, and times the call (K pack included):
-//   IDX_M=2048 IDX_N=4096 ./bench      (also IDX_B, IDX_H, IDX_D, BENCH_ITERS)
+//   IDX_M=2048 IDX_N=4096 ./bench      (also IDX_B, IDX_H, IDX_D, BENCH_ITERS,
+//                                       IDX_KV_BF16=1 for the bf16 instantiation)
 // Built with -DFLASHMLA_SHARED_LIB (build_libs.sh) it is amx_prefill_indexer.so.
 #include <immintrin.h>
 #include <omp.h>
@@ -76,6 +80,7 @@ static inline void idx_pack(const bf16* s, bf16* d, int stride) {
     }
 }
 
+template <bool KEY_SCALE>
 void indexer_amx(const bf16* Q, const bf16* K, const float* QS, const float* KS,
                  float* Out, int B, int M, int N, int H, int D) {
     const int NK = D / 32;                 // 4 k-steps for D=128
@@ -137,12 +142,15 @@ void indexer_amx(const bf16* Q, const bf16* K, const float* QS, const float* KS,
                         }
                     }
                 }
-                // scale by k_s[n] and write the score matrix ONCE
+                // fp8: scale by k_s[n]; bf16: no key scale. Write the score matrix ONCE.
                 for (int u = 0; u < 4; u++) {
-                    __m512 ks = _mm512_loadu_ps(KS + (size_t)b * N + (size_t)(jt+u) * 16);
-                    for (int i = 0; i < 16; i++)
-                        _mm512_storeu_ps(Out + ((size_t)b * M + (size_t)mt*16 + i) * N + (size_t)(jt+u)*16,
-                                         _mm512_mul_ps(_mm512_load_ps(&acc[u][i][0]), ks));
+                    __m512 ks;
+                    if constexpr (KEY_SCALE) ks = _mm512_loadu_ps(KS + (size_t)b * N + (size_t)(jt+u) * 16);
+                    for (int i = 0; i < 16; i++) {
+                        __m512 v = _mm512_load_ps(&acc[u][i][0]);
+                        if constexpr (KEY_SCALE) v = _mm512_mul_ps(v, ks);
+                        _mm512_storeu_ps(Out + ((size_t)b * M + (size_t)mt*16 + i) * N + (size_t)(jt+u)*16, v);
+                    }
                 }
             }
         }
@@ -151,11 +159,12 @@ void indexer_amx(const bf16* Q, const bf16* K, const float* QS, const float* KS,
 
 extern "C" int flashmla_indexer(const uint16_t* Q, const uint16_t* K,
                                 const float* QS, const float* KS, float* Out,
-                                int B, int M, int N, int H, int D) {
+                                int B, int M, int N, int H, int D, int kv_bf16) {
     static bool ok = idx_init_amx();
     if (!ok) return -1;
     if (N % 64 || M % 16 || D % 32) return -2;   // caller pads; see the Python side
-    indexer_amx((const bf16*)Q, (const bf16*)K, QS, KS, Out, B, M, N, H, D);
+    if (kv_bf16) indexer_amx<false>((const bf16*)Q, (const bf16*)K, QS, nullptr, Out, B, M, N, H, D);
+    else         indexer_amx<true >((const bf16*)Q, (const bf16*)K, QS, KS,      Out, B, M, N, H, D);
     return 0;
 }
 
@@ -166,21 +175,27 @@ extern "C" int flashmla_indexer(const uint16_t* Q, const uint16_t* K,
 static int env_int(const char* k, int d) { const char* v = getenv(k); return v && *v ? atoi(v) : d; }
 // float -> bf16 bits, keeping 3 mantissa bits so every value is fp8_e4m3-representable
 static bf16 to_fp8ish(float f) { uint32_t u; memcpy(&u, &f, 4); return (bf16)((u >> 16) & 0xFFF0); }
+// float -> bf16 bits, all 7 mantissa bits (truncation; any bf16 value is a valid input)
+static bf16 to_bf16(float f) { uint32_t u; memcpy(&u, &f, 4); return (bf16)(u >> 16); }
 static float bf2f(bf16 b) { uint32_t u = (uint32_t)b << 16; float f; memcpy(&f, &u, 4); return f; }
 
 int main() {
     const int B = env_int("IDX_B", 1), M = env_int("IDX_M", 2048), N = env_int("IDX_N", 4096);
     const int H = env_int("IDX_H", 64), D = env_int("IDX_D", 128), iters = env_int("BENCH_ITERS", 3);
-    printf("B=%d M=%d N=%d H=%d D=%d threads=%d\n", B, M, N, H, D, omp_get_max_threads());
+    const int kv_bf16 = env_int("IDX_KV_BF16", 0);
+    printf("B=%d M=%d N=%d H=%d D=%d threads=%d kv=%s\n", B, M, N, H, D, omp_get_max_threads(),
+           kv_bf16 ? "bf16" : "fp8");
+    auto cvt = kv_bf16 ? to_bf16 : to_fp8ish;
     std::mt19937 rng(0);
     std::normal_distribution<float> nd(0.f, 1.f);
     std::vector<bf16> Q((size_t)B * M * H * D), K((size_t)B * N * D);
     std::vector<float> QS((size_t)B * M * H), KS((size_t)B * N), Out((size_t)B * M * N);
-    for (auto& x : Q) x = to_fp8ish(nd(rng));
-    for (auto& x : K) x = to_fp8ish(nd(rng));
+    for (auto& x : Q) x = cvt(nd(rng));
+    for (auto& x : K) x = cvt(nd(rng));
     for (auto& x : QS) x = 0.01f * nd(rng);               // weights: signed
-    for (auto& x : KS) x = 0.5f + 0.01f * std::abs(nd(rng)); // k scales: positive
-    int rc = flashmla_indexer(Q.data(), K.data(), QS.data(), KS.data(), Out.data(), B, M, N, H, D);
+    for (auto& x : KS) x = kv_bf16 ? 1.f : 0.5f + 0.01f * std::abs(nd(rng)); // k scales: positive
+    const float* ksp = kv_bf16 ? nullptr : KS.data();   // bf16: the kernel must not read KS
+    int rc = flashmla_indexer(Q.data(), K.data(), QS.data(), ksp, Out.data(), B, M, N, H, D, kv_bf16);
     if (rc != 0) { printf("FATAL: rc=%d\n", rc); return 1; }
 
     // check 64 sampled rows (all N columns) against a double reference
@@ -208,7 +223,7 @@ int main() {
     double best = 1e30;
     for (int i = 0; i < iters; i++) {
         auto t0 = std::chrono::steady_clock::now();
-        flashmla_indexer(Q.data(), K.data(), QS.data(), KS.data(), Out.data(), B, M, N, H, D);
+        flashmla_indexer(Q.data(), K.data(), QS.data(), ksp, Out.data(), B, M, N, H, D, kv_bf16);
         best = std::min(best, std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
     }
     double flop = 2.0 * B * M * N * H * D;

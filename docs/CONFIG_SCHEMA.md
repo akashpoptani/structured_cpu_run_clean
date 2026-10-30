@@ -225,6 +225,13 @@ Cache compatibility is checked on read against **model identity + TP topology on
 
 `WEIGHTS_PRECISION` and `KV_CACHE_DTYPE` are separate concepts.
 
-bf16 KV cache is not implemented end-to-end yet. For now, `KV_CACHE_DTYPE="fp8"` remains the expected baseline value.
+`KV_CACHE_DTYPE` sets the precision of both caches, prefill and decode:
+
+| Value | MLA `kv_cache` | Indexer `k_cache` | Indexer `q` |
+|---|---|---|---|
+| `fp8` (baseline) | bf16 buffer, values round-tripped through fp8 (upstream) | fp8 + per-key fp32 `k_scale_cache` | `act_quant` to fp8 |
+| `bf16` | bf16, stored as is | bf16, `k_scale_cache` fixed at 1 | bf16 |
+
+`fp8` is upstream's numerics and matches the GPU references token for token. `bf16` does no `act_quant` on either cache, so it is not token-exact against them; compare it with an `fp8` run instead. Either value installs `mla_absorbed` and `indexer_forward` when prefill chunking or an AMX prefill kernel is on; `bf16` installs them always, since upstream has no switch. With `bf16`, decode also runs on the absorbed path (torch attention core).
 
 Do not treat this document as complete yet.

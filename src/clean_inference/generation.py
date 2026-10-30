@@ -66,10 +66,16 @@ def _stage_summary(dt_ms: float) -> str:
     idx = getattr(_kn, "INDEX_MS", 0.0)
     if idx:
         _kn.INDEX_MS = 0.0
+    # indexer_forward.STAGE_MS: the same "indexer" time split by piece; its
+    # idx_score includes the cache-slice copies around the kernel's score time.
+    _ix = getattr(_sys.modules.get("indexer_forward"), "STAGE_MS", None) or {}
+    sub = " ".join(f"{k[4:]}={v:.0f}" for k, v in _ix.items())
+    _ix.clear()
     if _cp is None or not _cp.STAGE_MS:
         return f"  [index_score={idx:.0f}]" if idx else ""
     tot = sum(_cp.STAGE_MS.values())
     parts = " ".join(f"{k}={v:.0f}" + (f"(score={idx:.0f})" if k == "indexer" and idx else "")
+                     + (f"[{sub}]" if k == "indexer" and sub else "")
                      for k, v in sorted(_cp.STAGE_MS.items(), key=lambda kv: -kv[1]))
     _cp.STAGE_MS.clear()
     return f"  [{parts} MLA_sum={tot:.0f} other={dt_ms - tot:.0f}]"
