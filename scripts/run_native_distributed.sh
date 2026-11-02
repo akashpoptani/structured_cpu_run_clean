@@ -95,6 +95,10 @@ elif [[ "${NATIVE_NO_GENERATE:-0}" == "1" ]]; then
 fi
 
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-32}"
+# Kernel toggles/tunables, read by src/overrides/flash_attn_cpu.py.
+export FLASHMLA_DECODE="${FLASHMLA_DECODE:-1}"
+export FLASHMLA_BLOCK_SIZE="${FLASHMLA_BLOCK_SIZE:-0}"
+export FLASHMLA_THREADS="${FLASHMLA_THREADS:-0}"
 export OMP_PROC_BIND="${OMP_PROC_BIND:-false}"
 export OMP_PLACES="${OMP_PLACES:-cores}"
 export MKL_NUM_THREADS="$OMP_NUM_THREADS"
@@ -124,6 +128,51 @@ if [[ -n "${SLURM_JOB_NODELIST:-}" && -z "${MASTER_ADDR:-}" ]]; then
   fi
 fi
 export MASTER_ADDR="${MASTER_ADDR:-127.0.0.1}"
+
+# Route gloo over InfiniBand, not the 1 GbE management interface.
+# getent resolves the hostname to eth0 (1000 Mb/s); ib0 is 200000 Mb/s and was
+# sitting idle. Measured consequence: all_reduce of [32768,7168] fp32 (0.94 GB)
+# took 8.36 s = 0.1 GB/s, which is 1 Gb/s wire speed. Prefill at Lin=120k fires
+# 476 such collectives (61 out_proj + 58 MoE layers x 4 chunks) -- about 66 min
+# of a 129 min prefill spent on a misconfigured network path.
+# OPT-IN via USE_IB=1. An ib0 that is UP but not ROUTABLE between the allocated
+# nodes makes gloo hang at rendezvous rather than fall back -- a standalone test
+# of exactly this hung for 8+ minutes on a 90-second workload. Defaulting it on
+# would turn every run into a potential hang, so it stays behind a flag until a
+# routability check passes.
+# If the batch script already resolved ib0 for every rank (the normal path),
+# GLOO_SOCKET_IFNAME and MASTER_ADDR are both set and this block is skipped --
+# no nested srun per rank, and no way for ranks to disagree.
+if [[ "${USE_IB:-0}" == "1" && -z "${GLOO_SOCKET_IFNAME:-}" ]] && ip -o -br addr show ib0 2>/dev/null | grep -q UP; then
+    export GLOO_SOCKET_IFNAME=ib0
+    # MASTER_ADDR must be the master's ib0 ADDRESS. Resolving a "${host}.ib"
+    # hostname does not work here -- that name does not exist, the lookup
+    # silently returns nothing, MASTER_ADDR stays on eth0, and gloo then tries
+    # to reach an eth0 address through the ib0 interface and HANGS at rendezvous
+    # (observed: 8+ min on an 80 s workload). Ask the master node directly.
+    if [[ -n "${SLURM_JOB_NODELIST:-}" ]]; then
+        _ibhost="$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n1)"
+        # '|| true' is load-bearing. This is a NESTED srun inside an srun
+        # step; under contention it can fail or be killed, and `set -e` then
+        # aborts the whole rank on the assignment -- before the fallback
+        # below can run. Job 27933115 died exactly this way: rank 0 resolved
+        # the address, rank 1's nested srun exited 192, rank 1 never reached
+        # init_process_group, and rank 0 sat in rendezvous until
+        # "Timed out after 901 seconds waiting for clients. 1/2 clients joined".
+        # The fallback was always correct; it was just unreachable.
+        _ibaddr="$(srun --nodes=1 --ntasks=1 -w "$_ibhost" --overlap \
+                     ip -o -4 addr show ib0 2>/dev/null \
+                     | awk '{print $4}' | cut -d/ -f1 | head -n1 || true)" || true
+        if [[ "$_ibaddr" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            export MASTER_ADDR="$_ibaddr"
+        else
+            echo "[run-native] WARNING: could not resolve ib0 address for $_ibhost;" \
+                 "falling back to eth0 to avoid a rendezvous hang"
+            unset GLOO_SOCKET_IFNAME
+        fi
+    fi
+fi
+echo "[run-native] GLOO_SOCKET_IFNAME=${GLOO_SOCKET_IFNAME:-<default>} MASTER_ADDR=$MASTER_ADDR"
 
 if [[ -z "${MASTER_PORT:-}" ]]; then
   if [[ -n "${SLURM_JOB_ID:-}" ]]; then

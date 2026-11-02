@@ -68,6 +68,30 @@ cat > "$SBATCH_PATH" <<EOF
 
 set -euo pipefail
 
+# Resolve the master's ib0 address ONCE here, in the batch script, and export
+# it to every rank. Doing it per-rank inside the srun step means each rank runs
+# a NESTED srun; under contention one can fail, and a rank that falls back to
+# eth0 while another uses ib0 will never rendezvous. Job 27933115 lost both
+# ranks that way. One resolution, one value, all ranks agree -- or nobody uses
+# ib0 and they all agree on that instead.
+# The resolved config is where USE_IB lives, and ONLY run_native_distributed.sh
+# sourced it -- so the block below silently never ran (job 27933407). Source it
+# here too; the file is the shell/Python handoff contract and is sourceable.
+set -a; . "$RESOLVED_CONFIG_PATH"; set +a
+if [ "\${USE_IB:-0}" = "1" ]; then
+    _m=\$(scontrol show hostnames "\$SLURM_JOB_NODELIST" | head -1)
+    _a=\$(srun --nodes=1 --ntasks=1 -w "\$_m" --overlap \\
+            ip -o -4 addr show ib0 2>/dev/null \\
+          | awk '{print \$4}' | cut -d/ -f1 | head -1 || true)
+    if printf '%s' "\$_a" | grep -qE '^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+\$'; then
+        export MASTER_ADDR="\$_a" GLOO_SOCKET_IFNAME=ib0
+        echo "[submit] ib0 resolved once for all ranks: MASTER_ADDR=\$_a"
+    else
+        echo "[submit] WARNING: could not resolve ib0 on \$_m; all ranks stay on eth0"
+        export USE_IB=0
+    fi
+fi
+
 echo "[submit] launching native distributed verification via srun"
 srun --nodes=$SBATCH_NODES --ntasks=$SBATCH_NODES --ntasks-per-node=$SBATCH_TASKS_PER_NODE \\
     bash "$CLEAN_ROOT/scripts/run_native_distributed.sh" "$RESOLVED_CONFIG_PATH"

@@ -9,6 +9,7 @@ optimisation log they are drawn from is [FlashMLAOptimisationsAndCheck.md](Flash
 | `bench_sparse_amx.cpp` | sparse | custom AMX intrinsics | `bench_sparse_amx.cpp` |
 | `bench_sparse_onednn.cpp` | sparse | OneDNN | `bench_sparse_onednn_correctway.cpp` |
 | `bench_dense_onednn.cpp` | dense | OneDNN | `bench_dense_onednn_correctway.cpp` |
+| `bench_prefill_sparse_amx.cpp` | sparse **prefill** | custom AMX intrinsics | new; see [Sparse prefill kernel](#sparse-prefill-kernel) |
 
 The 15 exploratory `bench_sparse_amx_v*.cpp` variants are **not** vendored; the optimisation ladder
 they represent is recorded below.
@@ -115,6 +116,100 @@ BENCH_B=3 FORCE_EFFECTIVE_THREADS=96 ./bench_sparse_amx
 
 > **Untracked but present:** the four `.pt` files (~259 MB). **Untracked and generated:** `bins/`,
 > `sparse_bins/` (~203 MB) and the compiled binaries. All are covered by [.gitignore](.gitignore).
+
+## Sparse prefill kernel
+
+`bench_prefill_sparse_amx.cpp` is the prefill counterpart of `bench_sparse_amx.cpp` (decode).
+It computes, for every query `s` and head `h`, attention over that query's own top-2048 tokens,
+in the absorbed (MQA) form that `src/overrides/mla_absorbed.py` uses:
+
+```
+keep   = topk[s] with entries > start_pos + s dropped        (causal: no future tokens)
+scores = q[s,h] (576) . cache[keep] (576) * scale
+out    = softmax(scores) @ cache[keep][:, :512]              -> [B, Sq, H, 512] bf16
+```
+
+How it is organised:
+- **AMX rows = 16 heads of one query**, the same layout as the decode kernel. Every head of a
+  query attends to the same top-k tokens, so a 16-head tile has a single key set and nothing is
+  masked. One task = one (batch row, query); its 64 heads per rank are 4 head tiles.
+- **Blocks of 64 tokens.** The query's kept tokens are walked 64 at a time (4 accumulator tiles
+  x 16 tokens). Each block is gathered from the cache and packed into AMX layout just before
+  use (136 KB, stays in L2) and reused by every head tile.
+- **Online (flash) softmax**: a running max and sum per row, so the score matrix is never stored.
+- Q is read straight from the model's tensors (heads are adjacent rows); `H` must be a multiple
+  of 16 (the C entry point returns -3 otherwise).
+- One file, two uses: built as an executable it runs `main()` (reads bins, checks against a
+  golden output, times it); built with `-DFLASHMLA_SHARED_LIB` it exports the C function
+  `flashmla_prefill_sparse()` for Python (`ctypes`).
+
+`prefill_sparse_gen_bins.py` makes its test input. It takes a **real** top-k dump from the
+indexer (`topk_layer*.npy`, written by `indexer_dump.py`), picks `--sq` query rows starting at
+`--q-start`, fills Q and the cache with random bf16 values, and writes `config.bin`, `q.bin`,
+`kv.bin`, `topk.bin` plus `out_golden.bin`: the same attention done slowly in PyTorch, one query
+at a time. `--q-start 0` picks rows whose top-k contains future positions, which is the case
+the causal filter exists for.
+
+Measured (one AMX node, H=64, Sq=2048, K=2048, one 2048-token chunk, 88 threads): 4K context
+36 ms at B=1 and 124 ms at B=4; 32K context (synthetic top-k) 31 ms at B=1 and 125-139 ms at
+B=4, i.e. 16-19 TFLOP/s.
+
+Test (one AMX node; all three sets must print `PASS`):
+
+```bash
+srun -p ramanvr -A ramanvr -N1 -n1 -c32 --mem=64G -t 00:20:00 \
+    bash FlashMLA_CPU/test_prefill_sparse.sh
+# TOPK_NPY=<topk_layerNNN.npy> overrides the dump; OUT=<dir> the bins/binary location
+```
+
+Using it in the model: build the shared library once (on an AMX node; it needs gcc 13), then set
+`USE_AMX_PREFILL_ATTENTION=1` in the run's config.
+
+```bash
+srun -p ramanvr -A ramanvr -N1 -n1 -c4 --mem=8G -t 00:10:00 bash FlashMLA_CPU/build_libs.sh
+#  -> FlashMLA_CPU/amx_prefill_attention.so (gitignored), entry point flashmla_prefill_sparse
+#  -> FlashMLA_CPU/amx_prefill_indexer.so (gitignored), entry point flashmla_indexer
+```
+
+`src/overrides/amx_prefill_attention.py` loads it with `ctypes` and hands it the model's tensors by
+pointer (`data_ptr()`), with no copies; `mla_absorbed.py` calls it in place of the torch
+attention core for every prefill forward. The library is linked with `-static-libstdc++`
+because model jobs do not load the gcc module.
+
+## Indexer kernel
+
+`bench_indexer_amx.cpp` computes the DeepSeek-V3.2 indexer scores for prefill, in place of the torch
+`fp8_index` in `src/overrides/kernel.py`:
+
+    out[m, n] = ( sum_h relu(q[m,h,:] . k[n,:]) * w[m,h] ) * k_scale[n]      q: [M,64,128], k: [N,128]
+
+The torch version builds a per-head `[M, 64, N]` fp32 tensor (64x the result) and runs at about
+0.2 TFLOP/s. The kernel keeps each 16x16 score tile in AMX/AVX registers, applies relu, the
+per-head weight and the sum over heads there, and writes `[M, N]` once.
+
+- Tile rows are **16 queries**; 4 accumulator tiles cover 64 keys; the loop over the 64 heads is
+  inside, so a query tile's partial sums never leave the core.
+- K is packed to VNNI once per call and shared by all query tiles.
+- It scores all N keys. The causal mask and top-k stay in torch.
+- Prefill only (M > 1). At decode M = 1 would waste 15 of 16 tile rows; decode keeps torch.
+- fp8 -> bf16 is exact, so only the summation order differs from torch.
+
+```bash
+srun -p ramanvr -A ramanvr -N1 -n1 -c96 --mem=64G -t 00:20:00 bash FlashMLA_CPU/test_indexer.sh
+```
+
+Measured (88 threads, H=64, D=128, all PASS, rel. error about 3e-7):
+
+| M (queries) | N (keys) | time | TFLOP/s |
+|---|---|---|---|
+| 2048 | 4096 | 4.2 ms | 32.4 |
+| 2048 | 32768 | 32.6 ms | 33.7 |
+| 2048 | 120000 | 120.5 ms | 33.4 |
+| 4096 | 120000 | 239.6 ms | 33.6 |
+
+In the model: set `USE_AMX_PREFILL_INDEXER=1` after `build_libs.sh` (it builds `amx_prefill_indexer.so`
+alongside the prefill library). `src/overrides/amx_prefill_indexer.py` loads it and sets
+`kernel.INDEX_IMPL`, which `fp8_index` uses whenever M > 1.
 
 ## Hardware and workload
 

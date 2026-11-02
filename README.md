@@ -406,6 +406,16 @@ slot machinery above exists and is tested, but only slot 0 is reachable until pl
 - To run a new experiment: copy an existing override, edit fields, then `bash scripts/submit_experiment.sh <TAG>`. Do not edit Python scripts for normal experiment-shape changes.
 - `SKIP_INDEXER_BROADCAST=1` (default) suppresses the Indexer's cross-rank debug broadcast (upstream `model.py:485`) via `src/overrides/indexer_broadcast.py`, dropping 61 discarded collectives per forward. **Not yet verified token-exact on hardware** — set `0` to restore upstream behavior. See [docs/CONFIG_SCHEMA.md](docs/CONFIG_SCHEMA.md) §9.
 
+> **Note — the indexer's Hadamard rotation runs only in CPU `KV_CACHE_DTYPE=fp8`. GPU FP8 (vLLM 0.16) never uses it.**
+>
+> | | Hadamard rotation of indexer q/k | fp8 `act_quant` of indexer q/k | Indexer key cache |
+> |---|---|---|---|
+> | CPU `KV_CACHE_DTYPE=bf16` | no | no | bf16 |
+> | CPU `KV_CACHE_DTYPE=fp8` | **yes** (DeepSeek reference, `src/overrides/fast_hadamard_transform.py`) | yes | fp8 + per-key scale |
+> | GPU vLLM 0.16, FP8 or BF16 weights, any `--kv-cache-dtype` | **no, never** | yes | fp8 + per-key scale, always |
+>
+> The rotation exists only to make fp8 rounding lose less; without quantisation q·k is unchanged, so `bf16` skips both. No CPU mode is the GPU's "quantise without rotating". At a 4K prompt every CPU mode agrees with every GPU run up to token index 8, where the GPU scores two tokens as an exact tie (`../gpu_refs_4k/RESULTS.md`).
+
 ## Current real configs
 
 | Tag | Purpose | Behavior |

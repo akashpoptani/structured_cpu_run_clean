@@ -2,6 +2,21 @@
 
 See [README.md](README.md) for the full flow. This file is the terse command index.
 
+## AMX kernels: standalone test and build
+
+```bash
+# sparse prefill kernel: builds, generates bins from a real top-k dump, checks 3 sets (all must PASS)
+srun -p ramanvr -A ramanvr -N1 -n1 -c32 --mem=64G -t 00:20:00 bash FlashMLA_CPU/test_prefill_sparse.sh
+
+# indexer kernel: random fp8-valued inputs vs a double reference, plus timing (all must PASS)
+srun -p ramanvr -A ramanvr -N1 -n1 -c96 --mem=64G -t 00:20:00 bash FlashMLA_CPU/test_indexer.sh
+
+# build the model's kernel libraries (needed before any USE_AMX_PREFILL_ATTENTION=1 / USE_AMX_PREFILL_INDEXER=1 run)
+srun -p ramanvr -A ramanvr -N1 -n1 -c4 --mem=8G -t 00:10:00 bash FlashMLA_CPU/build_libs.sh
+```
+
+See [FlashMLA_CPU/README.md](FlashMLA_CPU/README.md#sparse-prefill-kernel) and [Indexer kernel](FlashMLA_CPU/README.md#indexer-kernel).
+
 ## Real native runs (current)
 
 ```bash
@@ -316,3 +331,79 @@ tok,_=load_tokenizer(cfg, log_fn=lambda m: None)
 print(build_synthetic_cases(tok, 2048, 15, 1, 'T', config=cfg)[0]['source'])
 "
 ```
+
+## Batch-size sweep in one process (`BS_SWEEP`)
+
+`RUN_MODE="bench"` plus `BS_SWEEP="1,2,4,..."` in a config measures every listed
+batch size in a **single** process. The weight load is ~15 min, so an 11-point
+sweep run as 11 separate jobs spends ~2.8 h purely loading. Set `BATCH_SIZE` to
+the **max** of the sweep — that is what the KV cache is allocated for; smaller
+batches use the first rows.
+
+`BS_SWEEP` must be in the `parse_config.sh` whitelist or it is silently dropped
+from the resolved env (this has caught `USE_IB`, `FLASHMLA_THREADS`,
+`PREFILL_CHUNK` before).
+
+Each point writes `results_clean/results/<TAG>/bench_bs<N>.json` as it finishes
+and logs a `[bs-sweep] RESULT bs=<N> tpot_s=...` line, so a time-limit kill
+still leaves every completed point on disk. The sweep ascends, cheap points
+first.
+
+Under `dp2_true`, `BS=1` is skipped: `install_true_dp_moe` binds its forward
+from `BATCH_SIZE` (the max, so >1 → the sharded forward) while
+`_decode_case_group_sharded` shards on `len(cases) > 1`. At BS=1 those disagree
+and the ranks deadlock.
+
+Collect the matrix across modes (works mid-sweep):
+
+```bash
+.venv/bin/python scripts/collect_throughput.py
+```
+
+## Long-context TPOT without a long prefill (`SYNTH_CTX`)
+
+`SYNTH_CTX=<target>` plus `SYNTH_PREFILL=<n>` (default 4096) makes the bench
+sweep really prefill `n` tokens, tile that cache content out to `<target>`
+(`src/overrides/ctx_tile.py`), and decode from there. `LIN_TOKENS` still sets
+`max_seq_len`, which must cover `SYNTH_CTX + LOUT_TOKENS`.
+
+Why: a real 120k prefill is ~65 min at BS=1 and scales with BS x Lin, so a
+5-point batch sweep would need ~33 h of prefill for ~20 min of decode data.
+
+**Measures TPOT only.** The decode attends to repeated content, so generated
+text is meaningless and the top-2048 selection is drawn from a degenerate set.
+The COST is faithful because it is shape-driven.
+
+Validated (job 27933106 vs 27932907, matched Lin/cores/co-tenancy):
+
+| | TPOT |
+|---|---|
+| tiled @31744 | 2042 ms |
+| tiled @120000 | 2158 ms |
+| real @3072 | 2148 ms |
+
+The +116 ms from 31744 to 120000 matches the +90 ms predicted by a standalone
+indexer sweep (job 27933299: 0.39 / 0.62 / 1.14 / 2.09 ms per call at N =
+3072 / 31744 / 65536 / 120000, x61 layers).
+
+### Two traps these runs exposed
+
+**Job-to-job noise is +-200-600 ms, larger than the whole context effect
+(~100 ms from 3k to 120k).** Only compare across contexts WITHIN one process.
+A real run at Lin=31744 measured 2644 ms where physics allows ~2162; it sat on
+different nodes with different co-tenants. Batch comparisons inside one
+`BS_SWEEP` process are clean; cross-job context comparisons are not.
+
+**The first sweep point's prefill is first-touch, not prefill.** HCTP2 measured
+1272.7 s to prefill 4096 tokens at BS=1 and 352.6 s for the same 4096 tokens at
+BS=2 -- 3.6x faster for 2x the work. The first point pays page faults across
+the whole KV allocation. Discard it.
+
+### Decode-only stage breakdown
+
+`ctx_tile.timed_decode` now zeroes `chunked_prefill.STAGE_MS`, the kernel index
+timer and the attention timers AFTER prefill, then reports per-step. Use this
+rather than the `[kernel] decode stage breakdown` line from `native_run.py`,
+whose accumulators are reset BEFORE `greedy_decode` and therefore include the
+prefill call while being divided by decode steps -- at Lin=31744 that printed
+`INDEXER 8669.93` "per decode step" against a 2644 ms step.

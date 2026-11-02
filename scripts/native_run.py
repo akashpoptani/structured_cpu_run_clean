@@ -37,6 +37,7 @@ follows RUN_MODE_RESULT_FILENAME).
 
 import argparse
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -195,6 +196,12 @@ def _first_mismatch(expected: List[int], generated: List[int]) -> int:
     return -1
 
 
+# Set once from config["PREFILL_CHUNK"] before any decode. Module-level rather
+# than threaded through _decode_case_group / _decode_case_group_sharded and
+# their callers, which would be a wider change for no extra clarity.
+_PREFILL_CHUNK = 0
+
+
 def _decode_case_group(transformer, tokenizer, cases: List[Dict[str, Any]], log_fn) -> List[Dict[str, Any]]:
     """Tokenize + greedy decode `cases` TOGETHER as one batch of B=len(cases).
 
@@ -221,9 +228,51 @@ def _decode_case_group(transformer, tokenizer, cases: List[Dict[str, Any]], log_
     lout = louts.pop()
 
     t0 = time.perf_counter()
+    # Zero the kernel's stage accumulators so the breakdown below covers only
+    # this group's prefill+decode. This is the gather-vs-rest split for TPOT.
+    try:
+        import flash_attn_cpu as _fa
+        _fa.reset_timings()
+    except Exception:
+        _fa = None
+    try:
+        import kernel as _kn
+        _kn.reset_index_timer()
+    except Exception:
+        _kn = None
+
     generated_rows, prefill_s, decode_s = greedy_decode(
-        transformer, prompt_tokens, lout, log_fn=log_fn
+        transformer, prompt_tokens, lout, log_fn=log_fn,
+        prefill_chunk=_PREFILL_CHUNK,
     )
+
+    if _fa is not None:
+        _t = _fa.get_timings()
+        if _t.get("calls", 0):
+            # lout counts the token produced by PREFILL, so decode steps are
+            # lout-1 (confirmed: 427 kernel calls / 61 layers = 7 at lout=8).
+            steps = max(1, lout - 1)
+            log_fn("[kernel] decode stage breakdown, ms per decode step "
+                   f"(B={B}, {int(_t['calls'])} kernel calls total):")
+            for _k in ("gather", "kpack", "qkt", "softmax", "vpack", "amxv",
+                       "barrier", "reduce"):
+                log_fn(f"[kernel]   {_k:9s} {_t.get(_k, 0.0) / steps * 1e3:9.2f}")
+            if _kn is not None:
+                _it = _kn.get_index_timer()
+                if _it["calls"]:
+                    # NOT per-step: this accumulator is reset before
+                    # greedy_decode, so it spans PREFILL + decode, and the
+                    # prefill call dominates it. Call count gives it away --
+                    # attention logs 61*steps calls (decode only) while the
+                    # indexer logs 61*(steps+1), the extra one per layer being
+                    # the prefill chunk at M=Lin,N=Lin against M=1,N=ctx for
+                    # each decode step. At Lin=31744 that one call is ~99.8%
+                    # of the total, so dividing by steps and calling it
+                    # "per decode step" overstates decode indexer by ~500x.
+                    log_fn(f"[kernel]   {'INDEXER':9s} {_it['seconds'] * 1e3:9.2f} ms TOTAL"
+                           f" over prefill+decode ({int(_it['calls'])} fp8_index calls)")
+            log_fn(f"[kernel]   {'TOTAL':9s} "
+                   f"{sum(_t.get(k, 0.0) for k in ('gather','kpack','qkt','softmax','vpack','amxv','barrier','reduce')) / steps * 1e3:9.2f}")
     elapsed = time.perf_counter() - t0
 
     results: List[Dict[str, Any]] = []
@@ -698,6 +747,110 @@ def run(
         indexer_bcast_report = install_indexer_broadcast_skip(model_module, log_fn=log)
         base_result["indexer_bcast_report"] = indexer_bcast_report
 
+    global _PREFILL_CHUNK
+    # Chunked prefill must be installed BEFORE any forward: it rebinds
+    # MLA.forward onto the absorbed path so prefill reads the full kv cache.
+    # generation.py's chunking is unsafe without it.
+    # ORDER MATTERS: flash_attn_cpu sets chunked_prefill.ATTN_IMPL, which
+    # install_chunked_prefill reads when it binds MLA.forward. Installed the
+    # other way round, the kernel is loaded but never used.
+    if (config.get("USE_BF16_ALLREDUCE") or "").strip() == "1":
+        from bf16_allreduce import install_bf16_allreduce  # src/overrides
+
+        base_result["bf16_allreduce_report"] = install_bf16_allreduce(
+            model_module, log_fn=log)
+
+    # kernel.py (the override model.py imports) reads USE_AMX_INDEXER at call
+    # time, so it must be in the env regardless of the attention flag.
+    if (config.get("USE_AMX_INDEXER") or "").strip():
+        os.environ["USE_AMX_INDEXER"] = config["USE_AMX_INDEXER"].strip()
+
+    # moe_batched.py reads this at IMPORT time, so it must be in the env before
+    # install_batched_moe runs below.
+    if (config.get("MOE_BARRIER_PROBE") or "").strip():
+        os.environ["MOE_BARRIER_PROBE"] = config["MOE_BARRIER_PROBE"].strip()
+
+    use_amx_attention = (config.get("USE_AMX_ATTENTION") or "").strip() == "1"
+    if use_amx_attention:
+        # Kernel tunables come from the config but are read by flash_attn_cpu at
+        # import time, so they must be in os.environ BEFORE that import.
+        for _k in ("FLASHMLA_DECODE", "FLASHMLA_THREADS", "FLASHMLA_BLOCK_SIZE",
+                   "FLASHMLA_MOE_MIN_TOKENS", "USE_AMX_INDEXER"):
+            _v = (config.get(_k) or "").strip()
+            if _v:
+                os.environ[_k] = _v
+        from flash_attn_cpu import install_flash_attention  # src/overrides
+
+        base_result["flash_attn_report"] = install_flash_attention(
+            so_path=(config.get("AMX_ATTENTION_SO") or "").strip() or None,
+            log_fn=log)
+
+    # Install whenever EITHER chunking or the AMX kernels are wanted. The two
+    # are independent: chunking is an INDEXER workaround (its index_score is
+    # [bsz, seqlen, end_pos] -- 57.6 GB single-shot at Lin=120k, and chunking
+    # also halves its work, Lin^2 -> Lin^2/2), while the kernels are flash-style
+    # and need no chunking of their own.
+    if (int(config.get("PREFILL_CHUNK") or 0) > 0
+            or (config.get("USE_AMX_ATTENTION") or "").strip() == "1"):
+        from chunked_prefill import install_chunked_prefill  # src/overrides
+
+        _PREFILL_CHUNK = int(config["PREFILL_CHUNK"])
+
+        base_result["chunked_prefill_report"] = install_chunked_prefill(
+            transformer, model_module, log_fn=log)
+
+    # AMX prefill attention: sets mla_absorbed.PREFILL_IMPL, and raises if the
+    # .so is missing rather than silently measuring the torch core.
+    use_amx_prefill_attention = (config.get("USE_AMX_PREFILL_ATTENTION") or "0").strip() == "1"
+    if use_amx_prefill_attention:
+        from amx_prefill_attention import install_amx_prefill_attention  # src/overrides
+
+        base_result["amx_prefill_attention_report"] = install_amx_prefill_attention(
+            so_path=(config.get("AMX_PREFILL_ATTENTION_SO") or "").strip() or None, log_fn=log)
+
+    # AMX prefill indexer scores: sets kernel.INDEX_IMPL (fp8_index, M > 1 only).
+    # Independent of the absorbed install: both prefill paths call fp8_index.
+    if (config.get("USE_AMX_PREFILL_INDEXER") or "0").strip() == "1":
+        from amx_prefill_indexer import install_amx_prefill_indexer  # src/overrides
+
+        base_result["amx_prefill_indexer_report"] = install_amx_prefill_indexer(
+            so_path=(config.get("AMX_PREFILL_INDEXER_SO") or "").strip() or None, log_fn=log)
+
+    # Chunked prefill must be installed BEFORE any forward: it rebinds
+    # MLA.forward onto the absorbed path so prefill reads the full kv cache.
+    # generation.py's chunking is unsafe without it. The AMX kernel runs inside
+    # that same forward, so it needs the install even without chunking.
+    # KV_CACHE_DTYPE=bf16 also needs both overrides: upstream quantises both
+    # caches inside MLA.forward and Indexer.forward, with no switch.
+    #
+    # On top of chunked_prefill when USE_AMX_ATTENTION=1: mla_absorbed then takes
+    # every prefill forward and hands fp8 decode to the forward it replaced, so
+    # decode keeps the flash_attn_cpu kernels. Configs that only set
+    # USE_AMX_ATTENTION + PREFILL_CHUNK keep chunked_prefill for prefill too.
+    kv_cache_dtype = config["KV_CACHE_DTYPE"]
+    if (use_amx_prefill_attention or kv_cache_dtype == "bf16"
+            or (int(config.get("PREFILL_CHUNK") or 0) > 0 and not use_amx_attention)):
+        from mla_absorbed import install_mla_absorbed  # src/overrides
+        from indexer_forward import install_indexer_forward  # src/overrides
+
+        _PREFILL_CHUNK = int(config["PREFILL_CHUNK"])
+        base_result["mla_absorbed_report"] = install_mla_absorbed(
+            transformer, model_module, log_fn=log, kv_cache_dtype=kv_cache_dtype)
+        base_result["indexer_forward_report"] = install_indexer_forward(
+            transformer, model_module, kv_cache_dtype=kv_cache_dtype, log_fn=log)
+
+    # Optional: capture real Indexer top-k from the prefill pass. Needed to pick
+    # the sparse-prefill kernel structure (see src/overrides/indexer_dump.py).
+    # Only meaningful at LIN_TOKENS > 2048, where topk actually selects a subset.
+    if (config.get("INDEXER_DUMP_DIR") or "").strip():
+        from indexer_dump import install_indexer_dump  # src/overrides
+
+        _layers = [int(x) for x in (config.get("INDEXER_DUMP_LAYERS") or "0").split(",") if x.strip()]
+        base_result["indexer_dump_report"] = install_indexer_dump(
+            transformer, config["INDEXER_DUMP_DIR"].strip(),
+            layers=_layers, rank=int(dist_env["rank"]), log_fn=log,
+        )
+
     ep_moe_report: Optional[Dict[str, Any]] = None
     sharding_mode = config.get("SHARDING_MODE", "").lower()
     if sharding_mode in ("dp2_epon", "dp2_true"):
@@ -729,6 +882,14 @@ def run(
                 ep_size=int(config.get("EP_SIZE") or 0), log_fn=log,
             )
         base_result["ep_moe_report"] = ep_moe_report
+
+    # AFTER any EP/DP install (and outside it, since tp2 does no EP install and
+    # would otherwise never get here). Off by default; opt-in per run.
+    if (config.get("USE_BATCHED_MOE") or "").strip() == "1":
+        from moe_batched import install_batched_moe  # src/overrides
+
+        base_result["moe_batched_report"] = install_batched_moe(
+            transformer, model_module=model_module, log_fn=log)
 
     if no_generate:
         log(
@@ -814,11 +975,101 @@ def run(
         )
 
     elif run_mode == "bench":
-        base_result["total_cases"] = len(synthetic_cases)
-        _run_bench_phase(
-            transformer, tokenizer, synthetic_cases, base_result, shared,
-            config, is_root, log, RUN_MODE_RESULT_FILENAME["bench"],
-        )
+        # BS_SWEEP: measure several batch sizes in ONE process. The weight load
+        # is ~15 min, so a 9-point sweep run as 9 jobs spends 2.2 h just
+        # loading. The KV cache is allocated once for BATCH_SIZE (set to the
+        # max of the sweep) and a smaller batch simply uses the first rows;
+        # cases already overwrite the cache from position 0, which is why
+        # multi-case groups work today.
+        #
+        # dp2_true: install_true_dp_moe bound its forward from BATCH_SIZE (the
+        # max, so >1 -> the sharded forward) while _decode_case_group_sharded
+        # shards on len(group)>1. Sweeping BS=1 under dp2_true would make those
+        # two disagree and DEADLOCK the ranks, so BS=1 is skipped there.
+        _sweep = [int(x) for x in (config.get("BS_SWEEP") or "").replace(",", " ").split()]
+        # Under SYNTH_CTX the tiled path consumes only the first SYNTH_PREFILL
+        # tokens of each prompt, so building prompts at full LIN_TOKENS is pure
+        # waste -- at Lin=120k over a 5-point sweep that is 31 prompts of
+        # 120k tokens built to use 4k of each. LIN_TOKENS still sets
+        # max_seq_len (which must cover SYNTH_CTX + LOUT_TOKENS); only the
+        # prompt LENGTH drops.
+        _mkln = int(config.get("SYNTH_PREFILL") or 4096) if int(config.get("SYNTH_CTX") or 0) else lin_tokens
+        for _bs in (_sweep or [batch_size]):
+            if sharding_mode == "dp2_true" and _bs == 1:
+                log("[bs-sweep] BS=1 skipped under dp2_true (would deadlock vs the sharded MoE forward)")
+                continue
+            if _sweep:
+                log(f"[bs-sweep] ===== BATCH_SIZE={_bs} (Lin={lin_tokens} Lout={lout_tokens}) =====")
+                synthetic_cases = build_synthetic_cases(
+                    tokenizer, lin_tokens=_mkln, lout_tokens=lout_tokens,
+                    batch_size=_bs, tag_or_label=config["TAG"], config=config)
+            base_result["total_cases"] = len(synthetic_cases)
+            base_result["swept_batch_size"] = _bs
+            _ctx = int(config.get("SYNTH_CTX") or 0)
+            if _ctx:
+                # Long-context TPOT without a long prefill. See ctx_tile.py:
+                # a real SYNTH_PREFILL-token prefill is tiled out to _ctx so the
+                # decode sees a full-size cache. Measures TPOT only -- the
+                # generated tokens are meaningless.
+                import torch
+                from ctx_tile import tile_to_context, timed_decode  # src/overrides
+
+                _pf = int(config.get("SYNTH_PREFILL") or 4096)
+                # Cases carry prompt_text, NOT token ids -- encode here, the
+                # same way _decode_case_group does.
+                _rows = [encode_prompt(tokenizer, c["prompt_text"])[:_pf]
+                         for c in synthetic_cases]
+                _lens = {len(r) for r in _rows}
+                if _lens != {_pf}:
+                    raise ValueError(f"prefill rows must all be {_pf} tokens; got {sorted(_lens)}")
+                _tok = torch.tensor(_rows, dtype=torch.long)
+                # dp2_true: each rank prefills, tiles and decodes only its own
+                # rows -- the same cases[r::W] split as _decode_case_group_sharded.
+                # Without this the full batch went through every rank (27933614).
+                _local_bs = _bs
+                if sharding_mode == "dp2_true":
+                    import torch.distributed as dist
+                    _w, _rk = dist.get_world_size(), dist.get_rank()
+                    _tok = _tok[_rk::_w].contiguous()
+                    _local_bs = _tok.shape[0]
+                    log(f"[true-dp] tiled path: rank {_rk}/{_w} holds {_local_bs} of {_bs} sequences")
+                _t0 = time.perf_counter()
+                _chunk = int(config.get("PREFILL_CHUNK") or 0) or _pf
+                with torch.no_grad():
+                    for _p0 in range(0, _pf, _chunk):
+                        transformer.forward(_tok[:, _p0:_p0 + _chunk], _p0)
+                _pfs = time.perf_counter() - _t0
+                log(f"[bs-sweep] bs={_bs} real prefill {_pf} tok in {_pfs:.1f}s")
+                tile_to_context(transformer, _local_bs, _pf, _ctx, log_fn=log)
+                _ms = timed_decode(transformer, _tok, _ctx, lout_tokens, log_fn=log)
+                _warm = _ms[1:] or _ms
+                _tpot = sum(_warm) / len(_warm) / 1000.0
+                log(f"[bs-sweep] RESULT bs={_bs} ctx={_ctx} tpot_s={_tpot:.4f} "
+                    f"tok_s={_bs / _tpot:.3f} steps={len(_ms)} "
+                    f"min_ms={min(_warm):.0f} max_ms={max(_warm):.0f}")
+                _out = dict(base_result)
+                _out.update({"status": "tpot_tiled_context", "synth_ctx": _ctx,
+                             "synth_prefill": _pf, "prefill_seconds": _pfs,
+                             "step_ms": _ms,
+                             "bench_aggregate": {"tpot_seconds_mean": _tpot,
+                                                 "tokens_per_second_mean": _bs / _tpot,
+                                                 "ttft_seconds_mean": None}})
+                _write_result(config, _out, is_root, f"bench_bs{_bs}.json")
+                continue
+            try:
+                _r = _run_bench_phase(
+                    transformer, tokenizer, synthetic_cases, base_result, shared,
+                    config, is_root, log,
+                    f"bench_bs{_bs}.json" if _sweep else RUN_MODE_RESULT_FILENAME["bench"],
+                )
+                _a = _r["aggregate"]
+                log(f"[bs-sweep] RESULT bs={_bs} tpot_s={_a.get('tpot_seconds_mean')} "
+                    f"ttft_s={_a.get('ttft_seconds_mean')} tok_s={_a.get('tokens_per_second_mean')}")
+            except Exception as exc:
+                # OOM at the top of the sweep is the ANSWER (max batch size),
+                # not a failure -- record it and stop climbing.
+                log(f"[bs-sweep] RESULT bs={_bs} FAILED: {type(exc).__name__}: {exc}")
+                raise
 
     elif run_mode == "both":
         # Phase 1: verify on reference cases.
