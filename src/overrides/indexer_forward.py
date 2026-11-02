@@ -3,9 +3,10 @@
   fp8   upstream numerics, line for line (model.py:459-487): q and k go through
         act_quant, k_cache holds fp8 plus a per-key fp32 k_scale_cache, and the
         q scale is folded into the head weights.
-  bf16  no quantisation: k_cache is re-allocated as bf16 and holds k as is, q
-        stays bf16, and k_scale_cache is set to 1 once so fp8_index's final
-        "x k_s" is exact and the scorers need no second signature.
+  bf16  no quantisation and no Hadamard rotation (it only serves the fp8 rounding;
+        q.k is unchanged without it): k_cache is re-allocated as bf16 and holds k
+        as is, q stays bf16, and k_scale_cache is set to 1 once so fp8_index's
+        final "x k_s" is exact and the scorers need no second signature.
 
 Prefill and decode both run through here, since they share k_cache and a buffer
 has one dtype. The upstream debug broadcast (a cross-rank assert whose result is
@@ -56,8 +57,9 @@ def install_indexer_forward(transformer: Any, model_module: Any, kv_cache_dtype:
         k = torch.cat([k_pe, k_nope], dim=-1)
         weights = self.weights_proj(x.float()) * self.n_heads ** -0.5
         tick("idx_proj")
-        q = rotate_activation(q)
-        k = rotate_activation(k)
+        if not bf16:
+            q = rotate_activation(q)
+            k = rotate_activation(k)
         tick("idx_rotate")
         if bf16:
             self.k_cache[:bsz, start_pos:end_pos] = k
